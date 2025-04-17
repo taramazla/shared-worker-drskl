@@ -1,0 +1,168 @@
+services:
+  loadbalancer:
+    platform: linux/amd64
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.loadbalancer
+    container_name: citus_loadbalancer
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./config/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      coordinator_primary:
+        condition: service_healthy
+      coordinator_secondary:
+        condition: service_healthy
+    networks:
+      - citus_network
+    restart: unless-stopped
+
+  coordinator_primary:
+    platform: linux/amd64
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: citus_coordinator_primary
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: citus
+      POSTGRES_PASSWORD: citus
+      POSTGRES_DB: citus
+    entrypoint: ["/bin/bash", "/docker-entrypoint-initdb.d/primary-entrypoint.sh"]
+    volumes:
+      - citus_primary_data:/var/lib/postgresql/data
+      - ./scripts/coordinator/primary-entrypoint.sh:/docker-entrypoint-initdb.d/primary-entrypoint.sh
+    networks:
+      - citus_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U citus || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  coordinator_secondary:
+    platform: linux/amd64
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: citus_coordinator_secondary
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: citus
+      POSTGRES_PASSWORD: citus
+      POSTGRES_DB: citus
+    entrypoint: ["/bin/bash", "/docker-entrypoint-initdb.d/secondary-entrypoint.sh"]
+    volumes:
+      - citus_secondary_data:/var/lib/postgresql/data
+      - ./scripts/coordinator/secondary-entrypoint.sh:/docker-entrypoint-initdb.d/secondary-entrypoint.sh
+    depends_on:
+      coordinator_primary:
+        condition: service_healthy
+    networks:
+      - citus_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U citus"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  worker1:
+    platform: linux/amd64
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: citus_worker1
+    environment:
+      POSTGRES_USER: citus
+      POSTGRES_PASSWORD: citus
+      POSTGRES_DB: citus
+    command: ["postgres", "-c", "wal_level=logical", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    volumes:
+      - ./config/postgres/worker-pg_hba.conf:/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U citus"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - citus_network
+
+  worker2:
+    platform: linux/amd64
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: citus_worker2
+    environment:
+      POSTGRES_USER: citus
+      POSTGRES_PASSWORD: citus
+      POSTGRES_DB: citus
+    command: ["postgres", "-c", "wal_level=logical", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    volumes:
+      - ./config/postgres/worker-pg_hba.conf:/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U citus"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - citus_network
+
+  worker3:
+    platform: linux/amd64
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: citus_worker3
+    environment:
+      POSTGRES_USER: citus
+      POSTGRES_PASSWORD: citus
+      POSTGRES_DB: citus
+    command: ["postgres", "-c", "wal_level=logical", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    volumes:
+      - ./config/postgres/worker-pg_hba.conf:/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U citus"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - citus_network
+
+  manager:
+    platform: linux/amd64
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: citus_manager
+    depends_on:
+      - coordinator_primary
+      - coordinator_secondary
+      - worker1
+      - worker2
+      - worker3
+    entrypoint: ["/bin/bash", "-c", "/docker-entrypoint-initdb.d/setup.sh"]
+    volumes:
+      - ./scripts/setup.sh:/docker-entrypoint-initdb.d/setup.sh
+    networks:
+      - citus_network
+
+networks:
+  citus_network:
+    driver: bridge
+
+volumes:
+  citus_primary_data:
+  citus_secondary_data:
+  citus_worker1_data:
+  citus_worker2_data:
+  citus_worker3_data:

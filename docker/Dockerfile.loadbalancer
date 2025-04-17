@@ -1,0 +1,33 @@
+FROM haproxy:latest
+
+# Switch to root for package installation
+USER root
+
+# Install dependencies and setup apt repositories
+RUN apt-get update && apt-get install -y \
+    gnupg2 \
+    lsb-release \
+    curl \
+    ca-certificates \
+    bc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add PostgreSQL repository
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg
+RUN echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+
+# Install PostgreSQL client packages explicitly
+RUN apt-get update && apt-get install -y \
+    postgresql-client-15 \
+    postgresql-contrib-15 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a symbolic link for pgbench if not already present
+RUN if [ -f /usr/lib/postgresql/15/bin/pgbench ] && [ ! -f /usr/bin/pgbench ]; then \
+        ln -sf /usr/lib/postgresql/15/bin/pgbench /usr/bin/pgbench; \
+    fi
+
+# Verify installation
+RUN psql --version && \
+    (pgbench --version || echo "pgbench not available, using alternative path") && \
+    ls -la /usr/lib/postgresql/15/bin/
