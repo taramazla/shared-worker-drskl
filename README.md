@@ -12,6 +12,8 @@ This project builds a distributed PostgreSQL cluster with:
 - **PostGIS Integration**: Spatial data capabilities on all nodes
 - **Benchmarking Tools**: Locust-based tools for performance testing
 
+![Architecture Diagram](docs/shared-worker.png)
+
 ## Project Structure
 
 ```
