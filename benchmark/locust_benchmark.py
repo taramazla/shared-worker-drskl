@@ -2,7 +2,7 @@
 import time
 import random
 import os
-from locust import User, task, between, events
+from locust import User, task, between, events, TaskSet
 import psycopg2
 from psycopg2 import pool
 import statistics
@@ -57,6 +57,37 @@ conn_pool = None
 
 # Table existence flag
 table_exists = False
+
+# User behavioral patterns - each pattern represents a realistic user workflow
+USER_PATTERNS = {
+    "data_analyst": {
+        "description": "Data analyst who primarily runs read-heavy analytical queries",
+        "read_ratio": 90,
+        "spatial_ratio": 40,
+        "complex_ratio": 50,
+        "write_ratio": 10,
+        "batch_size": (1, 5),
+        "think_time": (2, 8)
+    },
+    "fleet_manager": {
+        "description": "Fleet manager who monitors vehicles and occasionally updates records",
+        "read_ratio": 70,
+        "spatial_ratio": 50,
+        "complex_ratio": 10,
+        "write_ratio": 30,
+        "batch_size": (1, 10),
+        "think_time": (1, 3)
+    },
+    "data_ingestion": {
+        "description": "Automated system that primarily writes data with occasional reads",
+        "read_ratio": 20,
+        "spatial_ratio": 10,
+        "complex_ratio": 5,
+        "write_ratio": 80,
+        "batch_size": (50, 200),
+        "think_time": (0.1, 0.5)
+    }
+}
 
 def ensure_vehicle_locations_table_exists():
     """Create the vehicle_locations table if it doesn't exist"""
@@ -152,15 +183,35 @@ def get_connection_pool():
     """Create or get the PostgreSQL connection pool"""
     global conn_pool
     if conn_pool is None:
-        conn_pool = psycopg2.pool.SimpleConnectionPool(
-            MIN_CONNECTIONS,
-            MAX_CONNECTIONS,
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME
-        )
+        try:
+            # Adjust connections based on expected users/load
+            min_conn = min(MIN_CONNECTIONS, os.cpu_count() * 5 if os.cpu_count() else 50)
+            max_conn = max(MAX_CONNECTIONS, min_conn * 2)
+
+            print(f"Initializing connection pool with {min_conn}-{max_conn} connections")
+            conn_pool = pool.ThreadedConnectionPool(
+                min_conn,
+                max_conn,
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME
+            )
+
+            # Test a connection from the pool
+            test_conn = conn_pool.getconn()
+            test_conn.set_session(autocommit=True)
+            test_cursor = test_conn.cursor()
+            test_cursor.execute("SELECT 1")
+            test_cursor.close()
+            conn_pool.putconn(test_conn)
+
+            print(f"Successfully initialized connection pool to {DB_HOST}:{DB_PORT}/{DB_NAME}")
+        except Exception as e:
+            print(f"Error creating connection pool: {e}")
+            # Don't raise here, as we'll handle the None pool case in execute_query
+            conn_pool = None
     return conn_pool
 
 @events.test_start.add_listener
@@ -277,61 +328,96 @@ def on_test_stop(environment, **kwargs):
     print(f"Metrics saved to {results_dir}/locust_metrics_{timestamp}.json")
 
 def execute_query(query, params=None, query_type="read"):
-    """Execute a database query and measure latency"""
+    """Execute a database query and measure latency with retries and better error handling"""
     conn = None
-    try:
-        # Get a connection from the pool
-        conn = conn_pool.getconn()
+    max_retries = 3
+    retry_count = 0
 
-        # Start timing
-        start_time = time.time()
+    while retry_count < max_retries:
+        try:
+            if not conn_pool:
+                # If pool doesn't exist yet, try to create it
+                pool = get_connection_pool()
+                if not pool:
+                    raise Exception("Connection pool initialization failed")
 
-        # Execute query
-        with conn.cursor() as cursor:
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
+            # Get a connection from the pool
+            conn = conn_pool.getconn()
+            conn.set_session(autocommit=True if query_type == "write" else False)
 
-            # Fetch results if it's a read query (including spatial)
-            if query_type in ["read", "spatial"]:
-                results = cursor.fetchall()
-                count = len(results)
-            else:  # For write operations
-                conn.commit()
-                count = cursor.rowcount
+            # Start timing
+            start_time = time.time()
 
-        # End timing and calculate latency
-        end_time = time.time()
-        latency_ms = (end_time - start_time) * 1000
+            # Execute query
+            with conn.cursor() as cursor:
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
 
-        # Store latency in custom metrics - treat spatial as read
-        if query_type == "read" or query_type == "spatial":
-            custom_metrics["read_latencies"].append(latency_ms)
-            if query_type == "spatial":
-                custom_metrics["spatial_count"] += 1
-            else:
-                custom_metrics["read_count"] += 1
-        elif query_type == "write":
-            custom_metrics["write_latencies"].append(latency_ms)
-            custom_metrics["write_count"] += 1
+                # Fetch results if it's a read query (including spatial)
+                if query_type in ["read", "spatial"]:
+                    results = cursor.fetchall()
+                    count = len(results)
+                    if query_type == "read" and not conn.autocommit:
+                        conn.commit()
+                else:  # For write operations
+                    count = cursor.rowcount
+                    if not conn.autocommit:
+                        conn.commit()
 
-        custom_metrics["success_count"] += 1
+            # End timing and calculate latency
+            end_time = time.time()
+            latency_ms = (end_time - start_time) * 1000
 
-        # Return the result count and latency
-        return count, latency_ms
+            # Store latency in custom metrics - treat spatial as read
+            if query_type == "read" or query_type == "spatial":
+                custom_metrics["read_latencies"].append(latency_ms)
+                if query_type == "spatial":
+                    custom_metrics["spatial_count"] += 1
+                else:
+                    custom_metrics["read_count"] += 1
+            elif query_type == "write":
+                custom_metrics["write_latencies"].append(latency_ms)
+                custom_metrics["write_count"] += 1
 
-    except Exception as e:
-        custom_metrics["errors"].append(str(e))
-        custom_metrics["error_count"] += 1
-        # Re-raise the exception with more context
-        raise Exception(f"Query failed: {e}")
+            custom_metrics["success_count"] += 1
 
-    finally:
-        # Return the connection to the pool
-        if conn:
-            conn_pool.putconn(conn)
+            # Return the result count and latency
+            return count, latency_ms
 
+        except psycopg2.OperationalError as e:
+            # This is a connection error, retry
+            retry_count += 1
+            error_msg = str(e).strip()
+            custom_metrics["errors"].append(f"Connection error (attempt {retry_count}): {error_msg}")
+
+            if retry_count >= max_retries:
+                custom_metrics["error_count"] += 1
+                return 0, 0
+
+            # Wait before retrying with exponential backoff
+            time.sleep(0.5 * (2 ** (retry_count - 1)))
+
+        except Exception as e:
+            # Other errors - log but don't retry
+            custom_metrics["errors"].append(str(e))
+            custom_metrics["error_count"] += 1
+            return 0, 0
+
+        finally:
+            # Return the connection to the pool
+            if conn and conn_pool:
+                try:
+                    conn_pool.putconn(conn)
+                except Exception:
+                    # If we can't return the connection, just close it
+                    try:
+                        conn.close()
+                    except:
+                        pass
+
+# Base User class for basic operations
 class PostgresUser(User):
     """Locust user class for PostgreSQL benchmark"""
 
@@ -586,3 +672,530 @@ class PostgresUser(User):
                     response_length=0,
                     exception=e
                 )
+
+# Task sets for user behavioral patterns
+class DataAnalystTasks(TaskSet):
+    """Task set simulating data analyst behavior - heavy on analytics queries"""
+
+    # Longer think time between operations to simulate analysis
+    wait_time = between(2, 8)
+
+    @task(50)
+    def run_complex_analysis(self):
+        """Run complex analytical queries"""
+        try:
+            query = """
+                SELECT
+                    region_code,
+                    COUNT(*) as vehicle_count,
+                    AVG(ST_X(location)) as avg_longitude,
+                    AVG(ST_Y(location)) as avg_latitude,
+                    MIN(recorded_at) as earliest_record,
+                    MAX(recorded_at) as latest_record
+                FROM vehicle_locations
+                GROUP BY region_code
+                ORDER BY vehicle_count DESC;
+            """
+            count, latency = execute_query(query, query_type="read")
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Complex Region Analysis",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Complex Region Analysis",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+    @task(40)
+    def run_spatial_analysis(self):
+        """Run spatial analysis to find clusters"""
+        try:
+            # Center point approximating Manhattan
+            center_lat = 40.7580
+            center_lon = -73.9855
+
+            # Create random radius between 1-8km
+            radius = random.randint(1000, 8000)
+
+            query = """
+                WITH vehicles_in_area AS (
+                    SELECT
+                        id,
+                        vehicle_id,
+                        location,
+                        recorded_at
+                    FROM
+                        vehicle_locations
+                    WHERE
+                        ST_DWithin(
+                            location::geography,
+                            ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+                            %s
+                        )
+                )
+                SELECT
+                    COUNT(*) as total_vehicles,
+                    MIN(recorded_at) as earliest_record,
+                    MAX(recorded_at) as latest_record
+                FROM
+                    vehicles_in_area;
+            """
+
+            count, latency = execute_query(
+                query,
+                params=(center_lon, center_lat, radius),
+                query_type="spatial"
+            )
+
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Spatial Density Analysis",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Spatial Density Analysis",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+    @task(10)
+    def create_summary_report(self):
+        """Create a summary report with occasional data insertion"""
+        try:
+            # First get a summary
+            query = """
+                SELECT
+                    DATE_TRUNC('day', recorded_at) as day,
+                    region_code,
+                    COUNT(*) as daily_count
+                FROM
+                    vehicle_locations
+                WHERE
+                    recorded_at > %s
+                GROUP BY
+                    DATE_TRUNC('day', recorded_at), region_code
+                ORDER BY
+                    day DESC, daily_count DESC
+                LIMIT 30;
+            """
+
+            # Look back about a week
+            lookback_days = random.randint(3, 10)
+            count, latency = execute_query(
+                query,
+                params=(datetime.now() - timedelta(days=lookback_days),),
+                query_type="read"
+            )
+
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Daily Summary Report",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+
+            # Occasionally store a result (simulating saving a report)
+            if random.random() < 0.2:  # 20% chance to perform a write after analysis
+                # Create a simulated summary record
+                summary_insert = """
+                    INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code)
+                    VALUES (-999, ST_SetSRID(ST_MakePoint(-74.0, 40.7), 4326), %s, 'summary_report')
+                    RETURNING id
+                """
+
+                w_count, w_latency = execute_query(
+                    summary_insert,
+                    params=(datetime.now(),),
+                    query_type="write"
+                )
+
+                self.user.environment.events.request.fire(
+                    request_type="Write",
+                    name="Save Analysis Report",
+                    response_time=w_latency,
+                    response_length=w_count,
+                    exception=None
+                )
+
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Mixed",
+                name="Create Summary Report",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+class FleetManagerTasks(TaskSet):
+    """Task set simulating fleet manager behavior - monitoring and updates"""
+
+    # Moderate think time to simulate operational work
+    wait_time = between(1, 3)
+
+    @task(40)
+    def check_vehicle_status(self):
+        """Check on status of random vehicles"""
+        try:
+            # Get a random number of vehicles to check
+            vehicle_count = random.randint(3, 15)
+
+            # Generate random vehicle IDs to check (simulate monitoring specific vehicles)
+            vehicle_ids = random.sample(range(1, 10000), vehicle_count)
+            placeholders = ", ".join(["%s"] * len(vehicle_ids))
+
+            query = f"""
+                SELECT
+                    vehicle_id,
+                    recorded_at,
+                    ST_X(location) as longitude,
+                    ST_Y(location) as latitude,
+                    region_code
+                FROM
+                    vehicle_locations
+                WHERE
+                    vehicle_id IN ({placeholders})
+                ORDER BY
+                    recorded_at DESC
+                LIMIT 100
+            """
+
+            count, latency = execute_query(
+                query,
+                params=vehicle_ids,
+                query_type="read"
+            )
+
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Vehicle Status Check",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Vehicle Status Check",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+    @task(30)
+    def monitor_region(self):
+        """Monitor vehicles in a specific region with spatial query"""
+        try:
+            # Select a random region
+            region = random.choice(["region_north", "region_south", "region_central"])
+
+            # Create a bounding box - simulating looking at a map area
+            center_lat = 40.7 + random.uniform(-0.2, 0.2)
+            center_lon = -74.0 + random.uniform(-0.2, 0.2)
+
+            # Size of the box - approximately 1-3 km
+            delta = random.uniform(0.01, 0.03)
+            min_lat = center_lat - delta
+            max_lat = center_lat + delta
+            min_lon = center_lon - delta
+            max_lon = center_lon + delta
+
+            query = """
+                SELECT
+                    vehicle_id,
+                    recorded_at,
+                    ST_X(location) as longitude,
+                    ST_Y(location) as latitude
+                FROM
+                    vehicle_locations
+                WHERE
+                    region_code = %s AND
+                    ST_Within(
+                        location,
+                        ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                    )
+                ORDER BY
+                    recorded_at DESC
+                LIMIT 200
+            """
+
+            count, latency = execute_query(
+                query,
+                params=(region, min_lon, min_lat, max_lon, max_lat),
+                query_type="spatial"
+            )
+
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Region Monitoring",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Region Monitoring",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+    @task(30)
+    def update_vehicle_locations(self):
+        """Update locations of vehicles - simulating fleet management"""
+        try:
+            # Choose how many vehicles to update
+            num_vehicles = random.randint(1, 5)
+
+            for _ in range(num_vehicles):
+                # Choose a random vehicle
+                vehicle_id = random.randint(1, 10000)
+
+                # Generate new position
+                lat = 40.7 + random.uniform(-0.5, 0.5)
+                lon = -74.0 + random.uniform(-0.5, 0.5)
+                region = random.choice(["region_north", "region_south", "region_central"])
+
+                # Update or insert
+                if random.random() < 0.7:  # 70% update, 30% insert
+                    query = """
+                        UPDATE vehicle_locations
+                        SET
+                            location = ST_SetSRID(ST_MakePoint(%s, %s), 4326),
+                            recorded_at = %s,
+                            region_code = %s
+                        WHERE
+                            vehicle_id = %s AND
+                            id IN (SELECT id FROM vehicle_locations WHERE vehicle_id = %s LIMIT 1)
+                        RETURNING id
+                    """
+                    params = (lon, lat, datetime.now(), region, vehicle_id, vehicle_id)
+                    op_name = "Update Vehicle Location"
+                else:
+                    # New vehicle entry
+                    query = """
+                        INSERT INTO vehicle_locations
+                            (vehicle_id, location, recorded_at, region_code)
+                        VALUES
+                            (%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s)
+                        RETURNING id
+                    """
+                    params = (vehicle_id, lon, lat, datetime.now(), region)
+                    op_name = "Insert Vehicle Location"
+
+                count, latency = execute_query(
+                    query,
+                    params=params,
+                    query_type="write"
+                )
+
+                self.user.environment.events.request.fire(
+                    request_type="Write",
+                    name=op_name,
+                    response_time=latency,
+                    response_length=count,
+                    exception=None
+                )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Write",
+                name="Update Vehicle Locations",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+class DataIngestionTasks(TaskSet):
+    """Task set simulating automated data ingestion - bulk writes with occasional reads"""
+
+    # Very short think time - simulating automated system
+    wait_time = between(0.1, 0.5)
+
+    @task(80)
+    def bulk_insert_data(self):
+        """Insert batches of data - simulating data feeds"""
+        try:
+            # Large batch inserts
+            batch_size = random.randint(50, 200)
+            values_list = []
+            insert_params = []
+
+            for _ in range(batch_size):
+                lat = 40.7 + random.uniform(-0.5, 0.5)
+                lon = -74.0 + random.uniform(-0.5, 0.5)
+                vehicle_id = random.randint(1, 10000)
+                region = random.choice(["region_north", "region_south", "region_central"])
+
+                # Simulate timestamped events coming in recent time
+                time_offset = random.randint(0, 3600)  # Last hour
+                recorded_at = datetime.now() - timedelta(seconds=time_offset)
+
+                values_list.append(f"(%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s)")
+                insert_params.extend([vehicle_id, lon, lat, recorded_at, region])
+
+            query = "INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code) VALUES " + ", ".join(values_list)
+            count, latency = execute_query(query, insert_params, "write")
+
+            self.user.environment.events.request.fire(
+                request_type="Write",
+                name=f"Bulk Insert ({batch_size} records)",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Write",
+                name="Bulk Insert",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+    @task(10)
+    def verify_recent_inserts(self):
+        """Check that recent inserts were successful"""
+        try:
+            # Check the most recent data - simulating verification
+            minutes = random.randint(5, 30)
+
+            query = """
+                SELECT
+                    COUNT(*) as recent_inserts,
+                    MIN(recorded_at) as earliest,
+                    MAX(recorded_at) as latest
+                FROM
+                    vehicle_locations
+                WHERE
+                    recorded_at > %s
+            """
+
+            count, latency = execute_query(
+                query,
+                params=(datetime.now() - timedelta(minutes=minutes),),
+                query_type="read"
+            )
+
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Verify Recent Inserts",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Read",
+                name="Verify Recent Inserts",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+    @task(10)
+    def purge_old_data(self):
+        """Delete old data - simulating cleanup processes"""
+        try:
+            # Remove older data
+            days_old = random.randint(60, 120)  # Simulate removing data 2-4 months old
+
+            query = """
+                DELETE FROM vehicle_locations
+                WHERE recorded_at < %s
+                RETURNING id
+            """
+
+            count, latency = execute_query(
+                query,
+                params=(datetime.now() - timedelta(days=days_old),),
+                query_type="write"
+            )
+
+            self.user.environment.events.request.fire(
+                request_type="Write",
+                name="Purge Old Data",
+                response_time=latency,
+                response_length=count,
+                exception=None
+            )
+        except Exception as e:
+            self.user.environment.events.request.fire(
+                request_type="Write",
+                name="Purge Old Data",
+                response_time=0,
+                response_length=0,
+                exception=e
+            )
+
+# New user class that simulates realistic behavioral patterns
+class BehavioralPatternUser(User):
+    """Simulates users with specific behavioral patterns"""
+
+    # Tasks can be dynamic based on environment variables
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Select a user pattern based on weights or environment variables
+        pattern_weights = {
+            "data_analyst": int(os.getenv("DATA_ANALYST_WEIGHT", "30")),
+            "fleet_manager": int(os.getenv("FLEET_MANAGER_WEIGHT", "50")),
+            "data_ingestion": int(os.getenv("DATA_INGESTION_WEIGHT", "20"))
+        }
+
+        # Normalize weights
+        total_weight = sum(pattern_weights.values())
+        if total_weight == 0:
+            # Default equal weights if all are 0
+            self.user_patterns = list(pattern_weights.keys())
+            self.user_weights = [1] * len(self.user_patterns)
+        else:
+            self.user_patterns = list(pattern_weights.keys())
+            self.user_weights = [pattern_weights[p] for p in self.user_patterns]
+
+    # Dynamic wait time based on selected pattern
+    wait_time = between(0.1, 5)  # Will be overridden in task sets
+
+    def on_start(self):
+        """Initialize the user with a behavioral pattern"""
+        try:
+            # Check connection and table
+            execute_query("SELECT 1")
+
+            # Select a user pattern based on weights
+            self.selected_pattern = random.choices(
+                self.user_patterns,
+                weights=self.user_weights,
+                k=1
+            )[0]
+
+            print(f"User started with behavioral pattern: {self.selected_pattern}")
+        except Exception as e:
+            print(f"Database connection failed: {e}")
+            raise StopUser()
+
+    # Task distribution based on the selected pattern
+    @task
+    def run_pattern_tasks(self):
+        pattern = self.selected_pattern
+
+        if pattern == "data_analyst":
+            # Data analysts run analytical queries
+            self.schedule_task(DataAnalystTasks)
+        elif pattern == "fleet_manager":
+            # Fleet managers monitor and update vehicle data
+            self.schedule_task(FleetManagerTasks)
+        elif pattern == "data_ingestion":
+            # Automated systems primarily write data
+            self.schedule_task(DataIngestionTasks)
