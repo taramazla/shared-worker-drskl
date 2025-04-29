@@ -53,10 +53,50 @@ get_worker_container_id() {
   docker ps --filter "name=citus_worker${worker_num}" --format "{{.ID}}"
 }
 
+# Function to validate container existence
+validate_container() {
+  local container_name=$1
+  if ! docker ps --filter "name=$container_name" --format "{{.ID}}" | grep -q .; then
+    echo -e "${RED}Container $container_name not found or not running.${NC}"
+    echo "WARNING: Container $container_name not found or not running at $(date)" >> "$RESULTS_DIR/events.log"
+    return 1
+  fi
+  return 0
+}
+
+# Function to safely stop a container
+safe_container_stop() {
+  local container_name=$1
+  if validate_container "$container_name"; then
+    echo -e "${YELLOW}Stopping container $container_name...${NC}"
+    docker stop "$container_name"
+    return $?
+  else
+    echo -e "${RED}Cannot stop non-existent or non-running container: $container_name${NC}"
+    return 1
+  fi
+}
+
+# Function to safely start a container
+safe_container_start() {
+  local container_name=$1
+  if docker ps -a --filter "name=$container_name" --format "{{.ID}}" | grep -q .; then
+    echo -e "${GREEN}Starting container $container_name...${NC}"
+    docker start "$container_name"
+    return $?
+  else
+    echo -e "${RED}Cannot start non-existent container: $container_name${NC}"
+    echo "ERROR: Container $container_name does not exist at $(date)" >> "$RESULTS_DIR/events.log"
+    return 1
+  fi
+}
+
 # Start Locust benchmark in the background with mixed workload
 echo -e "${GREEN}Starting benchmark load in background...${NC}"
+# Create a specific log file name for this failover test
+LOCUST_LOG_FILE="locust_failover_${TIMESTAMP}.log"
 USERS=$USERS SPAWN_RATE=$SPAWN_RATE RUN_TIME=$RUN_TIME READ_WEIGHT=70 WRITE_WEIGHT=30 \
-  nohup "$SCRIPT_DIR/run_locust_benchmark.sh" > "$RESULTS_DIR/locust_output.log" 2>&1 &
+  nohup "$SCRIPT_DIR/run_locust_benchmark.sh" --custom-tag="failover_${TIMESTAMP}" > "$RESULTS_DIR/locust_output.log" 2>&1 &
 
 BENCHMARK_PID=$!
 echo -e "${GREEN}Benchmark process started with PID: $BENCHMARK_PID${NC}"
@@ -85,7 +125,7 @@ if [[ "$FAILOVER_TYPE" == "coordinator" || "$FAILOVER_TYPE" == "both" || "$FAILO
     echo "Coordinator failover triggered at $(date), timestamp: $COORD_FAILOVER_TIME" >> "$RESULTS_DIR/events.log"
 
     # Stop the primary coordinator to simulate failure
-    docker stop citus_coordinator_primary
+    safe_container_stop citus_coordinator_primary
     echo -e "${RED}Primary coordinator stopped. Testing HAProxy failover...${NC}"
 
     # Record failover time in the results
@@ -98,7 +138,7 @@ if [[ "$FAILOVER_TYPE" == "coordinator" || "$FAILOVER_TYPE" == "both" || "$FAILO
 
     # Restart the primary coordinator to restore HA capability
     echo -e "${GREEN}Restoring primary coordinator...${NC}"
-    docker start citus_coordinator_primary
+    safe_container_start citus_coordinator_primary
     COORD_RECOVERY_TIME=$(date +%s)
     echo "Primary coordinator restored at $(date), timestamp: $COORD_RECOVERY_TIME" >> "$RESULTS_DIR/events.log"
     echo "Coordinator recovery delay: $((COORD_RECOVERY_TIME - COORD_FAILOVER_TIME)) seconds" >> "$RESULTS_DIR/events.log"
@@ -135,7 +175,7 @@ if [[ "$FAILOVER_TYPE" == "worker" || "$FAILOVER_TYPE" == "both" || "$FAILOVER_T
     echo "Worker${WORKER_TO_FAIL} failover triggered at $(date), timestamp: $WORKER_FAILOVER_TIME" >> "$RESULTS_DIR/events.log"
 
     # Stop the worker to simulate failure
-    docker stop citus_worker${WORKER_TO_FAIL}
+    safe_container_stop citus_worker${WORKER_TO_FAIL}
     echo -e "${RED}Worker${WORKER_TO_FAIL} stopped. Testing shard replication failover...${NC}"
 
     # Record worker failover time in the results
@@ -148,7 +188,7 @@ if [[ "$FAILOVER_TYPE" == "worker" || "$FAILOVER_TYPE" == "both" || "$FAILOVER_T
 
     # Restart the worker to restore full system capacity
     echo -e "${GREEN}Restoring worker${WORKER_TO_FAIL}...${NC}"
-    docker start citus_worker${WORKER_TO_FAIL}
+    safe_container_start citus_worker${WORKER_TO_FAIL}
     WORKER_RECOVERY_TIME=$(date +%s)
     echo "Worker${WORKER_TO_FAIL} restored at $(date), timestamp: $WORKER_RECOVERY_TIME" >> "$RESULTS_DIR/events.log"
     echo "Worker recovery delay: $((WORKER_RECOVERY_TIME - WORKER_FAILOVER_TIME)) seconds" >> "$RESULTS_DIR/events.log"
@@ -156,12 +196,19 @@ fi
 
 # Wait for the benchmark to complete
 echo -e "${YELLOW}Waiting for benchmark to complete...${NC}"
-wait $BENCHMARK_PID || true
+wait $BENCHMARK_PID || { echo -e "${RED}Benchmark process failed or was interrupted.${NC}"; }
 
 # Copy the results to the specific directory
 echo -e "${GREEN}Collecting benchmark results...${NC}"
-cp benchmark_results/locust_mixed_70_30.log $RESULTS_DIR/ 2>/dev/null || true
-cp benchmark_results/locust_metrics_*.json $RESULTS_DIR/ 2>/dev/null || true
+
+# Use a more flexible approach to find the right log files
+CUSTOM_TAG="failover_${TIMESTAMP}"
+find benchmark_results -type f -name "locust_${CUSTOM_TAG}.log" -exec cp {} "$RESULTS_DIR/" \; 2>/dev/null || echo -e "${YELLOW}No specific log file found for this test.${NC}"
+
+# Copy any metrics files that were generated during our test run
+# Get the start time in seconds since epoch for comparison
+START_TIME_SECONDS=$(date -d "$(grep "Benchmark start time:" "$RESULTS_DIR/events.log" | cut -d ':' -f 2-)" +%s 2>/dev/null || echo $START_TIME)
+find benchmark_results -type f -name "locust_metrics_*.json" -newermt "@$START_TIME_SECONDS" -exec cp {} "$RESULTS_DIR/" \; 2>/dev/null || echo -e "${YELLOW}No metrics files found for this test.${NC}"
 
 # Add metadata about the test to the events log
 echo "Test configuration:" >> "$RESULTS_DIR/events.log"
@@ -188,5 +235,19 @@ echo -e "${BLUE}============================================${NC}"
 # Run the analysis script if available
 if [ -f "$SCRIPT_DIR/analyze_failover_results.py" ]; then
     echo -e "${GREEN}Running automatic analysis of failover results...${NC}"
-    python "$SCRIPT_DIR/analyze_failover_results.py" "$RESULTS_DIR"
+
+    # Check if we're in a virtual environment or if one exists
+    if [[ -n "$VIRTUAL_ENV" ]]; then
+        echo -e "${GREEN}Using active virtual environment for analysis${NC}"
+        python "$SCRIPT_DIR/analyze_failover_results.py" "$RESULTS_DIR"
+    elif [[ -f "env/bin/activate" ]]; then
+        echo -e "${YELLOW}Activating virtual environment for analysis${NC}"
+        source env/bin/activate
+        python "$SCRIPT_DIR/analyze_failover_results.py" "$RESULTS_DIR"
+        deactivate
+    else
+        echo -e "${YELLOW}Using system Python for analysis${NC}"
+        python3 "$SCRIPT_DIR/analyze_failover_results.py" "$RESULTS_DIR" ||
+            echo -e "${RED}Failed to run analysis script. Check Python environment and dependencies.${NC}"
+    fi
 fi

@@ -57,6 +57,10 @@ while [[ $# -gt 0 ]]; do
       SPAWN_RATE=${1#*=}
       shift
       ;;
+    --custom-tag=*)
+      CUSTOM_TAG=${1#*=}
+      shift
+      ;;
     *)
       shift
       ;;
@@ -163,8 +167,10 @@ prepare_results_dir() {
   # Create benchmark_results directory if it doesn't exist
   mkdir -p benchmark_results
 
-  # Generate a tag for the results file based on the mode
-  if [ -n "$OPERATION_MODE" ]; then
+  # Generate a tag for the results file based on the mode or custom tag
+  if [ -n "$CUSTOM_TAG" ]; then
+    RESULTS_TAG="_${CUSTOM_TAG}"
+  elif [ -n "$OPERATION_MODE" ]; then
     RESULTS_TAG="_${OPERATION_MODE}"
   else
     RESULTS_TAG="_mixed_${READ_WEIGHT}_${WRITE_WEIGHT}"
