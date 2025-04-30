@@ -17,6 +17,8 @@ LOCUST_HOST=${LOCUST_HOST:-"http://localhost:8089"}
 READ_WEIGHT=${READ_WEIGHT:-80}  # Default 80% reads
 WRITE_WEIGHT=${WRITE_WEIGHT:-20} # Default 20% writes
 OPERATION_MODE="" # Empty for mixed mode
+WEB_UI_MODE=false # Default to headless mode
+WEB_UI_PORT=${WEB_UI_PORT:-8089} # Default web UI port
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -37,6 +39,14 @@ while [[ $# -gt 0 ]]; do
       RATIO=${1#*=}
       READ_WEIGHT=${RATIO%:*}
       WRITE_WEIGHT=${RATIO#*:}
+      shift
+      ;;
+    --web-ui)
+      WEB_UI_MODE=true
+      shift
+      ;;
+    --web-ui-port=*)
+      WEB_UI_PORT=${1#*=}
       shift
       ;;
     *)
@@ -101,6 +111,11 @@ else
   echo -e "Mode: mixed (${READ_WEIGHT}% read, ${WRITE_WEIGHT}% write)"
 fi
 echo -e "Users: ${USERS}, Spawn rate: ${SPAWN_RATE}, Run time: ${RUN_TIME}s"
+if [ "$WEB_UI_MODE" = true ]; then
+  echo -e "Web UI: Enabled on port ${WEB_UI_PORT}"
+else
+  echo -e "Web UI: Disabled (running in headless mode)"
+fi
 
 # Check if the database is accessible
 echo -e "${YELLOW}Checking database connection...${NC}"
@@ -121,9 +136,14 @@ if ! $PYTHON_CMD -c "import psycopg2; conn=psycopg2.connect(host='${DB_HOST}', p
         echo -e "${YELLOW}Copying locust file to container...${NC}"
         docker cp locust_benchmark.py ${CONTAINER}:/locust_benchmark.py
 
-        # Run locust from within the container
+        # Run locust from within the container with or without web UI
         echo -e "${GREEN}Running Locust from within Docker container...${NC}"
-        docker exec -i ${CONTAINER} locust -f /locust_benchmark.py --headless -u ${USERS} -r ${SPAWN_RATE} -t ${RUN_TIME}s --host ${LOCUST_HOST}
+        if [ "$WEB_UI_MODE" = true ]; then
+          echo -e "${YELLOW}Web UI will be available at http://localhost:${WEB_UI_PORT}${NC}"
+          docker exec -i ${CONTAINER} locust -f /locust_benchmark.py -u ${USERS} -r ${SPAWN_RATE} --web-port ${WEB_UI_PORT} --host ${LOCUST_HOST}
+        else
+          docker exec -i ${CONTAINER} locust -f /locust_benchmark.py --headless -u ${USERS} -r ${SPAWN_RATE} -t ${RUN_TIME}s --host ${LOCUST_HOST}
+        fi
         exit $?
     fi
 fi
@@ -140,11 +160,18 @@ fi
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
-# Run the Locust test in headless mode
+# Run the Locust test
 echo -e "${GREEN}Starting Locust benchmark...${NC}"
-$PYTHON_CMD -m locust -f ${SCRIPT_DIR}/locust_benchmark.py --headless -u ${USERS} -r ${SPAWN_RATE} -t ${RUN_TIME}s \
-  --host ${LOCUST_HOST} --logfile ${SCRIPT_DIR}/benchmark_results/locust${RESULTS_TAG}.log
+if [ "$WEB_UI_MODE" = true ]; then
+  echo -e "${YELLOW}Web UI will be available at http://localhost:${WEB_UI_PORT}${NC}"
+  echo -e "${YELLOW}Press Ctrl+C to stop the test when finished${NC}"
+  $PYTHON_CMD -m locust -f ${SCRIPT_DIR}/locust_benchmark.py --web-port ${WEB_UI_PORT} --host ${LOCUST_HOST}
+else
+  # Run in headless mode with specified duration
+  $PYTHON_CMD -m locust -f ${SCRIPT_DIR}/locust_benchmark.py --headless -u ${USERS} -r ${SPAWN_RATE} -t ${RUN_TIME}s \
+    --host ${LOCUST_HOST} --logfile ${SCRIPT_DIR}/benchmark_results/locust${RESULTS_TAG}.log
 
-# Print summary
-echo -e "${GREEN}Benchmark complete!${NC}"
-echo -e "Check the results in the benchmark_results directory."
+  # Print summary
+  echo -e "${GREEN}Benchmark complete!${NC}"
+  echo -e "Check the results in the benchmark_results directory."
+fi
