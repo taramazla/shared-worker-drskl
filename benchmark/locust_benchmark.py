@@ -717,6 +717,11 @@ class PoissonUserShape(LoadTestShape):
         # Determine elapsed time since test start
         start = custom_metrics.get("start_time") or time.time()
         elapsed = time.time() - start
+        # Stop after last stage if elapsed time exceeds total duration
+        total_duration = sum(s["duration"] for s in STAGES)
+        if elapsed >= total_duration:
+            print("All stages complete. Stopping test.")
+            return None
         # Find current stage
         remaining = elapsed
         for s in STAGES:
