@@ -72,17 +72,17 @@ current_mean_wait = BASE_MEAN_WAIT
 
 # Define workload stages with duration in seconds and arrival rate λ (requests per second)
 STAGES = [
-    {"name": "Overnight baseline", "duration": 120, "lambda": 10},
-    {"name": "Morning peak", "duration": 180, "lambda": 40},
-    {"name": "Late morning decline", "duration": 180, "lambda": 30},
-    {"name": "Lunch spike", "duration": 180, "lambda": 60},
-    {"name": "Afternoon steady", "duration": 180, "lambda": 30},
-    {"name": "Flash sale – build up", "duration": 60, "lambda": 100},
-    {"name": "Flash sale – peak", "duration": 120, "lambda": 200},
-    {"name": "Flash sale – post sale", "duration": 60, "lambda": 100},
-    {"name": "Evening peak", "duration": 180, "lambda": 50},
-    {"name": "Late night wind down – 1", "duration": 60, "lambda": 25},
-    {"name": "Late night wind down – 2", "duration": 120, "lambda": 10},
+    {"name": "Overnight baseline", "duration": 120, "lambda": 100},
+    {"name": "Morning peak", "duration": 180, "lambda": 400},
+    {"name": "Late morning decline", "duration": 180, "lambda": 300},
+    {"name": "Lunch spike", "duration": 180, "lambda": 600},
+    {"name": "Afternoon steady", "duration": 180, "lambda": 300},
+    {"name": "Flash sale – build up", "duration": 60, "lambda": 1000},
+    {"name": "Flash sale – peak", "duration": 120, "lambda": 2000},
+    {"name": "Flash sale – post sale", "duration": 60, "lambda": 1000},
+    {"name": "Evening peak", "duration": 180, "lambda": 500},
+    {"name": "Late night wind down – 1", "duration": 60, "lambda": 250},
+    {"name": "Late night wind down – 2", "duration": 120, "lambda": 100},
 ]
 
 # Define dynamic exponential inter-arrival time function by stages
