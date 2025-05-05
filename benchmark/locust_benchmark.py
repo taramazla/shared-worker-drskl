@@ -4,7 +4,6 @@ import random
 import os
 from locust import User, task, between, events
 import psycopg2
-from psycopg2 import pool
 import statistics
 import json
 from datetime import datetime, timedelta
@@ -12,6 +11,7 @@ from locust.exception import StopUser
 from collections import deque
 import numpy as np
 from locust import LoadTestShape
+import threading
 
 # Database connection parameters
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -28,6 +28,14 @@ WRITE_WEIGHT = int(os.getenv("WRITE_WEIGHT", "20"))  # Default 20% writes
 # Only calculate SPATIAL_WEIGHT if we're doing reads, but treat as part of READ
 SPATIAL_WEIGHT = min(30, READ_WEIGHT) if READ_WEIGHT > 0 else 0
 
+# Concurrent connection settings
+MAX_CONCURRENT_QUERIES = int(os.getenv("MAX_CONCURRENT_QUERIES", "50"))  # Maximum concurrent queries
+CONCURRENT_MODE = os.getenv("CONCURRENT_MODE", "true").lower() == "true"  # Enable/disable concurrent mode
+
+# Create a semaphore to limit concurrent connections
+concurrent_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES)
+metrics_lock = threading.Lock()
+
 # Print the operation mode for clarity
 if READ_WEIGHT > 0 and WRITE_WEIGHT > 0:
     print(f"Running in MIXED mode: {READ_WEIGHT}% read, {WRITE_WEIGHT}% write")
@@ -38,9 +46,10 @@ elif WRITE_WEIGHT > 0:
 else:
     print("WARNING: Both READ_WEIGHT and WRITE_WEIGHT are 0. No operations will run.")
 
-# Connection pooling settings
-MIN_CONNECTIONS = 100
-MAX_CONNECTIONS = 250
+# Print concurrent connection mode
+print(f"Concurrent mode: {'ENABLED' if CONCURRENT_MODE else 'DISABLED'}")
+if CONCURRENT_MODE:
+    print(f"Maximum concurrent connections: {MAX_CONCURRENT_QUERIES}")
 
 # Store metrics for custom reporting
 custom_metrics = {
@@ -55,7 +64,9 @@ custom_metrics = {
     "spatial_count": 0,  # Keep this for backward compatibility
     "recent_response_times": deque(maxlen=100),  # Store recent response times
     "error_rate": 0.0,  # Current error rate
-    "last_adjustment_time": time.time()  # Track when we last adjusted the wait time
+    "last_adjustment_time": time.time(),  # Track when we last adjusted the wait time
+    "concurrent_queries": 0,  # Track active concurrent queries
+    "max_concurrent": 0,  # Track maximum concurrent queries observed
 }
 
 # Dynamic load parameters
@@ -73,16 +84,16 @@ current_mean_wait = BASE_MEAN_WAIT
 # Define workload stages with duration in seconds and arrival rate λ (requests per second)
 STAGES = [
     {"name": "Overnight baseline", "duration": 120, "lambda": 100},
-    {"name": "Morning peak", "duration": 180, "lambda": 400},
-    {"name": "Late morning decline", "duration": 180, "lambda": 300},
-    {"name": "Lunch spike", "duration": 180, "lambda": 600},
-    {"name": "Afternoon steady", "duration": 180, "lambda": 300},
-    {"name": "Flash sale – build up", "duration": 60, "lambda": 1000},
-    {"name": "Flash sale – peak", "duration": 120, "lambda": 2000},
-    {"name": "Flash sale – post sale", "duration": 60, "lambda": 1000},
-    {"name": "Evening peak", "duration": 180, "lambda": 500},
-    {"name": "Late night wind down – 1", "duration": 60, "lambda": 250},
-    {"name": "Late night wind down – 2", "duration": 120, "lambda": 100},
+    {"name": "Morning commute rush", "duration": 180, "lambda": 400},
+    {"name": "Mid-morning slowdown", "duration": 180, "lambda": 300},
+    {"name": "Lunch hour surge", "duration": 180, "lambda": 600},
+    {"name": "Afternoon business travel", "duration": 180, "lambda": 300},
+    {"name": "Rush hour build-up", "duration": 60, "lambda": 1000},
+    {"name": "Rush hour peak", "duration": 120, "lambda": 2000},
+    {"name": "Rush hour wind-down", "duration": 60, "lambda": 1000},
+    {"name": "Evening outing rush", "duration": 180, "lambda": 500},
+    {"name": "Late evening return", "duration": 60, "lambda": 250},
+    {"name": "Nightfall slowdown", "duration": 120, "lambda": 100}
 ]
 
 # Define dynamic exponential inter-arrival time function by stages
@@ -164,114 +175,189 @@ def ensure_vehicle_locations_table_exists():
     """Create the vehicle_locations table if it doesn't exist"""
     global table_exists
 
-    conn = None
-    try:
-        conn = get_connection_pool().getconn()
-        with conn.cursor() as cursor:
-            # First check if the table exists
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables
-                    WHERE table_name = 'vehicle_locations'
-                );
-            """)
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        conn = None
+        try:
+            print(f"Checking table existence (attempt {attempt+1}/{max_attempts})...")
+            conn = get_connection()
 
-            table_exists = cursor.fetchone()[0]
+            # Check if PostGIS extension exists
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM pg_extension WHERE extname = 'postgis';")
+                has_postgis = cursor.fetchone()[0] > 0
 
-            if not table_exists:
-                print("Creating vehicle_locations table...")
-
-                # Create PostGIS extension if needed
-                try:
+                if not has_postgis:
+                    print("PostGIS extension not found. Attempting to create it...")
                     cursor.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
                     conn.commit()
-                    print("PostGIS extension created or already exists")
-                except Exception as e:
-                    print(f"Warning: Could not create PostGIS extension: {e}")
+                    print("PostGIS extension created successfully")
+                else:
+                    print("PostGIS extension already exists")
 
-                # Create the table
+            # Now check if the table exists
+            with conn.cursor() as cursor:
                 cursor.execute("""
-                    CREATE TABLE vehicle_locations (
-                      id bigserial,
-                      vehicle_id int NOT NULL,
-                      location geometry(Point, 4326) NOT NULL,
-                      recorded_at timestamptz NOT NULL,
-                      region_code text NOT NULL
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'vehicle_locations'
                     );
                 """)
+                table_exists = cursor.fetchone()[0]
 
-                # Create indexes
-                cursor.execute("""
-                    CREATE INDEX idx_vehicle_locations_location
-                    ON vehicle_locations USING GIST (location);
-                """)
+                if not table_exists:
+                    print("Creating vehicle_locations table...")
 
-                cursor.execute("""
-                    CREATE INDEX idx_vehicle_locations_region_code
-                    ON vehicle_locations (region_code);
-                """)
+                    # Create the table
+                    cursor.execute("""
+                        CREATE TABLE vehicle_locations (
+                          id bigserial PRIMARY KEY,
+                          vehicle_id int NOT NULL,
+                          location geometry(Point, 4326) NOT NULL,
+                          recorded_at timestamptz NOT NULL,
+                          region_code text NOT NULL
+                        );
+                    """)
+                    conn.commit()
 
-                # Insert some sample data
-                print("Inserting sample data...")
-                cursor.execute("""
-                    INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code)
-                    SELECT
-                        (floor(random() * 10000) + 1)::int AS vehicle_id,
-                        ST_SetSRID(
-                            ST_MakePoint(
-                            -74.0 + random() * 0.5,
-                            40.7 + random() * 0.5
-                            ),
-                            4326
-                        ) AS location,
-                        NOW() - (random() * interval '30 days') AS recorded_at,
-                        CASE
-                            WHEN random() < 0.33 THEN 'region_north'
-                            WHEN random() < 0.66 THEN 'region_south'
-                            ELSE 'region_central'
-                        END AS region_code
-                    FROM generate_series(1, 10000) s(i);
-                """)
+                    # Create indexes
+                    cursor.execute("""
+                        CREATE INDEX idx_vehicle_locations_location
+                        ON vehicle_locations USING GIST (location);
+                    """)
+                    conn.commit()
 
-                conn.commit()
-                table_exists = True
-                print("Successfully created vehicle_locations table with sample data.")
-            else:
-                print("vehicle_locations table already exists.")
+                    cursor.execute("""
+                        CREATE INDEX idx_vehicle_locations_region_code
+                        ON vehicle_locations (region_code);
+                    """)
+                    conn.commit()
 
-    except Exception as e:
-        print(f"Error creating table: {e}")
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            get_connection_pool().putconn(conn)
+                    cursor.execute("""
+                        CREATE INDEX idx_vehicle_locations_vehicle_id
+                        ON vehicle_locations (vehicle_id);
+                    """)
+                    conn.commit()
 
-    return table_exists
+                    # Insert some sample data (commit in smaller batches)
+                    print("Inserting sample data in batches...")
+                    batch_size = 1000
+                    for i in range(0, 10, 1):
+                        cursor.execute(f"""
+                            INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code)
+                            SELECT
+                                (floor(random() * 10000) + 1)::int AS vehicle_id,
+                                ST_SetSRID(
+                                    ST_MakePoint(
+                                    -74.0 + random() * 0.5,
+                                    40.7 + random() * 0.5
+                                    ),
+                                    4326
+                                ) AS location,
+                                NOW() - (random() * interval '30 days') AS recorded_at,
+                                CASE
+                                    WHEN random() < 0.33 THEN 'region_north'
+                                    WHEN random() < 0.66 THEN 'region_south'
+                                    ELSE 'region_central'
+                                END AS region_code
+                            FROM generate_series(1, {batch_size}) s(i);
+                        """)
+                        conn.commit()
+                        print(f"Inserted batch {i+1}/10 ({batch_size} rows)")
 
-def get_connection_pool():
-    """Create or get the PostgreSQL connection pool"""
-    global conn_pool
-    if conn_pool is None:
-        conn_pool = psycopg2.pool.SimpleConnectionPool(
-            MIN_CONNECTIONS,
-            MAX_CONNECTIONS,
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME
-        )
-    return conn_pool
+                    # Verify the table was created successfully
+                    cursor.execute("SELECT COUNT(*) FROM vehicle_locations;")
+                    row_count = cursor.fetchone()[0]
+
+                    if row_count > 0:
+                        table_exists = True
+                        print(f"Successfully created vehicle_locations table with {row_count} sample data rows")
+                    else:
+                        print("Table created but no data was inserted")
+                else:
+                    # Table already exists, verify it has data
+                    cursor.execute("SELECT COUNT(*) FROM vehicle_locations;")
+                    row_count = cursor.fetchone()[0]
+                    print(f"vehicle_locations table already exists with {row_count} rows")
+
+                    if row_count == 0:
+                        print("Table exists but has no data. Adding sample data...")
+                        # Add sample data
+                        batch_size = 1000
+                        for i in range(0, 10, 1):
+                            cursor.execute(f"""
+                                INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code)
+                                SELECT
+                                    (floor(random() * 10000) + 1)::int AS vehicle_id,
+                                    ST_SetSRID(
+                                        ST_MakePoint(
+                                        -74.0 + random() * 0.5,
+                                        40.7 + random() * 0.5
+                                        ),
+                                        4326
+                                    ) AS location,
+                                    NOW() - (random() * interval '30 days') AS recorded_at,
+                                    CASE
+                                        WHEN random() < 0.33 THEN 'region_north'
+                                        WHEN random() < 0.66 THEN 'region_south'
+                                        ELSE 'region_central'
+                                    END AS region_code
+                                FROM generate_series(1, {batch_size}) s(i);
+                            """)
+                            conn.commit()
+                            print(f"Inserted batch {i+1}/10 ({batch_size} rows)")
+
+            # If we get to this point without exceptions, we're good
+            return table_exists
+
+        except Exception as e:
+            print(f"Error in table creation (attempt {attempt+1}): {e}")
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            # Sleep before retry
+            if attempt < max_attempts - 1:
+                sleep_time = 2 ** attempt  # Exponential backoff
+                print(f"Retrying in {sleep_time} seconds...")
+                time.sleep(sleep_time)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+
+    # If we get here, all attempts failed
+    return False
+
+def get_connection():
+    """Create a new PostgreSQL connection"""
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME
+    )
+
+    # Set search_path for this connection to ensure schema visibility
+    with conn.cursor() as cursor:
+        cursor.execute("SET search_path TO citus;")
+        conn.commit()
+
+    return conn
 
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
-    """Initialize the connection pool when the test starts"""
-    print("Initializing database connection pool...")
+    """Initialize database connection when the test starts"""
+    print(f"Initializing database connection to {DB_HOST}:{DB_PORT}...")
     try:
-        get_connection_pool()
-        print(f"Connection pool established to {DB_HOST}:{DB_PORT}")
+        # Test connection
+        conn = get_connection()
+        conn.close()
+        print(f"Database connection successful")
 
         # Ensure vehicle_locations table exists
         if ensure_vehicle_locations_table_exists():
@@ -283,16 +369,13 @@ def on_test_start(environment, **kwargs):
         custom_metrics["start_time"] = time.time()
 
     except Exception as e:
-        print(f"Failed to initialize connection pool: {e}")
+        print(f"Failed to initialize database connection: {e}")
         environment.process_exit()
 
 @events.test_stop.add_listener
 def on_test_stop(environment, **kwargs):
-    """Close all connections in the pool when the test ends"""
-    global conn_pool
-    if conn_pool:
-        conn_pool.closeall()
-        print("Connection pool closed")
+    """Clean up when the test ends and report metrics"""
+    print("Test stopping. Generating metrics...")
 
     # Calculate test duration and throughput, using fallback if start_time was not recorded
     end_time = time.time()
@@ -314,6 +397,7 @@ def on_test_stop(environment, **kwargs):
     print(f"Overall throughput: {total_throughput:.2f} ops/sec ({total_ops} operations in {test_duration:.2f} seconds)")
     print(f"Read throughput: {read_throughput:.2f} ops/sec ({total_read_count} operations, includes {custom_metrics['spatial_count']} spatial)")
     print(f"Write throughput: {write_throughput:.2f} ops/sec ({custom_metrics['write_count']} operations)")
+    print(f"Maximum concurrent connections: {custom_metrics['max_concurrent']}")
 
     # Generate summary statistics
     if custom_metrics["read_latencies"]:
@@ -370,6 +454,7 @@ def on_test_stop(environment, **kwargs):
                 "write": custom_metrics["write_count"],
                 "spatial": custom_metrics["spatial_count"]  # Keep for reference
             },
+            "max_concurrent_connections": custom_metrics["max_concurrent"],
             "success_count": custom_metrics["success_count"],
             "error_count": custom_metrics["error_count"],
             "success_rate": success_rate,
@@ -380,9 +465,19 @@ def on_test_stop(environment, **kwargs):
 def execute_query(query, params=None, query_type="read"):
     """Execute a database query and measure latency"""
     conn = None
+    acquired_semaphore = False
+
     try:
-        # Get a connection from the pool
-        conn = conn_pool.getconn()
+        # Acquire semaphore before executing query
+        if CONCURRENT_MODE:
+            concurrent_semaphore.acquire()
+            acquired_semaphore = True
+            with metrics_lock:
+                custom_metrics["concurrent_queries"] += 1
+                custom_metrics["max_concurrent"] = max(custom_metrics["max_concurrent"], custom_metrics["concurrent_queries"])
+
+        # Get a connection
+        conn = get_connection()
 
         # Start timing
         start_time = time.time()
@@ -407,40 +502,42 @@ def execute_query(query, params=None, query_type="read"):
         latency_ms = (end_time - start_time) * 1000
 
         # Add to recent response times for load adjustment
-        custom_metrics["recent_response_times"].append(latency_ms)
+        with metrics_lock:
+            custom_metrics["recent_response_times"].append(latency_ms)
+
+            # Store latency in custom metrics - treat spatial as read
+            if query_type == "read" or query_type == "spatial":
+                custom_metrics["read_latencies"].append(latency_ms)
+                if query_type == "spatial":
+                    custom_metrics["spatial_count"] += 1
+                else:
+                    custom_metrics["read_count"] += 1
+            elif query_type == "write":
+                custom_metrics["write_latencies"].append(latency_ms)
+                custom_metrics["write_count"] += 1
+
+            custom_metrics["success_count"] += 1
+
+            # Update error rate
+            total_ops = custom_metrics["success_count"] + custom_metrics["error_count"]
+            if total_ops > 0:
+                custom_metrics["error_rate"] = custom_metrics["error_count"] / total_ops
 
         # Adjust wait time based on system metrics
         adjust_wait_time()
-
-        # Store latency in custom metrics - treat spatial as read
-        if query_type == "read" or query_type == "spatial":
-            custom_metrics["read_latencies"].append(latency_ms)
-            if query_type == "spatial":
-                custom_metrics["spatial_count"] += 1
-            else:
-                custom_metrics["read_count"] += 1
-        elif query_type == "write":
-            custom_metrics["write_latencies"].append(latency_ms)
-            custom_metrics["write_count"] += 1
-
-        custom_metrics["success_count"] += 1
-
-        # Update error rate
-        total_ops = custom_metrics["success_count"] + custom_metrics["error_count"]
-        if total_ops > 0:
-            custom_metrics["error_rate"] = custom_metrics["error_count"] / total_ops
 
         # Return the result count and latency
         return count, latency_ms
 
     except Exception as e:
-        custom_metrics["errors"].append(str(e))
-        custom_metrics["error_count"] += 1
+        with metrics_lock:
+            custom_metrics["errors"].append(str(e))
+            custom_metrics["error_count"] += 1
 
-        # Update error rate
-        total_ops = custom_metrics["success_count"] + custom_metrics["error_count"]
-        if total_ops > 0:
-            custom_metrics["error_rate"] = custom_metrics["error_count"] / total_ops
+            # Update error rate
+            total_ops = custom_metrics["success_count"] + custom_metrics["error_count"]
+            if total_ops > 0:
+                custom_metrics["error_rate"] = custom_metrics["error_count"] / total_ops
 
         # Adjust wait time after error
         adjust_wait_time()
@@ -449,9 +546,18 @@ def execute_query(query, params=None, query_type="read"):
         raise Exception(f"Query failed: {e}")
 
     finally:
-        # Return the connection to the pool
+        # Release semaphore after executing query - only if we acquired it
+        if CONCURRENT_MODE and acquired_semaphore:
+            with metrics_lock:
+                custom_metrics["concurrent_queries"] -= 1
+            concurrent_semaphore.release()
+
+        # Close the connection
         if conn:
-            conn_pool.putconn(conn)
+            try:
+                conn.close()
+            except Exception as e:
+                print(f"Error closing connection: {e}")
 
 class PostgresUser(User):
     """Locust user class for PostgreSQL benchmark"""
@@ -461,10 +567,14 @@ class PostgresUser(User):
 
     def on_start(self):
         """Called when a User starts running"""
-        # Check if connection pool is working
+        # Check if database connection is working
         try:
             # Execute a simple query to verify connection
-            execute_query("SELECT 1")
+            conn = get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            conn.close()
         except Exception as e:
             print(f"Database connection failed: {e}")
             raise StopUser()
@@ -510,7 +620,9 @@ class PostgresUser(User):
 
                 elif query_type == "random_vehicle":
                     count, latency = execute_query(
-                        "SELECT * FROM vehicle_locations ORDER BY random() LIMIT 1"
+                        "SELECT vehicle_id, recorded_at, region_code FROM vehicle_locations " +
+                        "WHERE vehicle_id = %s ORDER BY recorded_at DESC LIMIT 1",
+                        (random.randint(1, 10000),)
                     )
                     self.environment.events.request.fire(
                         request_type="Read",
@@ -582,8 +694,8 @@ class PostgresUser(User):
                         max_lon = min_lon + random.uniform(0.05, 0.1)
 
                         count, latency = execute_query(
-                            "SELECT * FROM vehicle_locations " +
-                            "WHERE ST_Within(location, ST_MakeEnvelope(%s, %s, %s, %s, 4326)) " +
+                            "SELECT id, vehicle_id, recorded_at, region_code FROM vehicle_locations " +
+                            "WHERE location && ST_MakeEnvelope(%s, %s, %s, %s, 4326) " +
                             "LIMIT 500",
                             (min_lon, min_lat, max_lon, max_lat),
                             "spatial"  # Still mark as spatial for counting
@@ -687,7 +799,7 @@ class PostgresUser(User):
                 elif op_type == "delete_vehicle":
                     # Delete a random vehicle entry created more than 25 days ago
                     count, latency = execute_query(
-                        "DELETE FROM vehicle_locations WHERE id IN (SELECT id FROM vehicle_locations WHERE recorded_at < %s ORDER BY random() LIMIT 1)",
+                        "DELETE FROM vehicle_locations WHERE recorded_at < %s AND id IN (SELECT id FROM vehicle_locations WHERE recorded_at < %s LIMIT 1)",
                         (datetime.now() - timedelta(days=25),),
                         "write"
                     )
