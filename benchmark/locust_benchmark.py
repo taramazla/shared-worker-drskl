@@ -723,69 +723,35 @@ class PostgresUser(User):
         def write_operation(self):
             """Perform write operations"""
             try:
-                # Choose a random write operation
-                op_type = random.choice([
-                    "single_insert",
-                    "small_batch",
+                query_type = random.choice([
+                    "insert_vehicle",
                     "update_vehicle",
                     "delete_vehicle"
                 ])
 
-                if op_type == "single_insert":
-                    # Generate a random location near NYC
-                    lat = 40.7 + random.uniform(-0.5, 0.5)
-                    lon = -74.0 + random.uniform(-0.5, 0.5)
-                    vehicle_id = random.randint(1, 10000)
-                    region = random.choice(["region_north", "region_south", "region_central"])
-
+                if query_type == "insert_vehicle":
+                    # Insert a new vehicle location
                     count, latency = execute_query(
                         "INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code) " +
-                        "VALUES (%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s) RETURNING id",
-                        (vehicle_id, lon, lat, datetime.now(), region),
+                        "VALUES (%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), NOW(), %s)",
+                        (random.randint(1, 10000), -74.0 + random.uniform(-0.1, 0.1), 40.7 + random.uniform(-0.1, 0.1),
+                         random.choice(['region_north', 'region_south', 'region_central'])),
                         "write"
                     )
                     self.environment.events.request.fire(
                         request_type="Write",
-                        name="Single Insert",
+                        name="Insert Vehicle",
                         response_time=latency,
                         response_length=count,
                         exception=None
                     )
 
-                elif op_type == "small_batch":
-                    # Prepare batch insert query
-                    batch_size = random.randint(5, 20)
-                    values_list = []
-                    insert_params = []
-
-                    for _ in range(batch_size):
-                        lat = 40.7 + random.uniform(-0.5, 0.5)
-                        lon = -74.0 + random.uniform(-0.5, 0.5)
-                        vehicle_id = random.randint(1, 10000)
-                        region = random.choice(["region_north", "region_south", "region_central"])
-                        recorded_at = datetime.now() - timedelta(seconds=random.randint(0, 86400))
-
-                        values_list.append(f"(%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s, %s)")
-                        insert_params.extend([vehicle_id, lon, lat, recorded_at, region])
-
-                    # Build and execute the batch insert
-                    query = "INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code) VALUES " + ", ".join(values_list)
-                    count, latency = execute_query(query, insert_params, "write")
-
-                    self.environment.events.request.fire(
-                        request_type="Write",
-                        name="Batch Insert",
-                        response_time=latency,
-                        response_length=count,
-                        exception=None
-                    )
-
-                elif op_type == "update_vehicle":
-                    # Update the timestamp for a random vehicle
-                    vehicle_id = random.randint(1, 10000)
+                elif query_type == "update_vehicle":
+                    # Update a vehicle location
                     count, latency = execute_query(
-                        "UPDATE vehicle_locations SET recorded_at = %s WHERE vehicle_id = %s AND id IN (SELECT id FROM vehicle_locations WHERE vehicle_id = %s LIMIT 1)",
-                        (datetime.now(), vehicle_id, vehicle_id),
+                        "UPDATE vehicle_locations SET location = ST_SetSRID(ST_MakePoint(%s, %s), 4326) " +
+                        "WHERE vehicle_id = %s",
+                        (-74.0 + random.uniform(-0.1, 0.1), 40.7 + random.uniform(-0.1, 0.1), random.randint(1, 10000)),
                         "write"
                     )
                     self.environment.events.request.fire(
@@ -796,11 +762,11 @@ class PostgresUser(User):
                         exception=None
                     )
 
-                elif op_type == "delete_vehicle":
-                    # Delete a random vehicle entry created more than 25 days ago
+                elif query_type == "delete_vehicle":
+                    # Delete a vehicle location
                     count, latency = execute_query(
-                        "DELETE FROM vehicle_locations WHERE recorded_at < %s AND id IN (SELECT id FROM vehicle_locations WHERE recorded_at < %s LIMIT 1)",
-                        (datetime.now() - timedelta(days=25),),
+                        "DELETE FROM vehicle_locations WHERE vehicle_id = %s",
+                        (random.randint(1, 10000),),
                         "write"
                     )
                     self.environment.events.request.fire(

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# This script runs the Locust benchmark and simulates failover on worker1 at every stage.
+# This script runs the Locust benchmark and simulates failover on workers at every stage.
 # It assumes the stages and durations are defined in benchmark/locust_benchmark.py.
 
 # --- CONFIGURABLE ---
@@ -20,7 +20,10 @@ STAGES=(
   120  # Late night wind down – 2
 )
 
-FAILOVER_DURATION=10  # seconds to keep worker1 down before each stage
+# Failover simulation settings
+FAILOVER_DURATION=10  # seconds to keep worker down before each stage
+WORKER_ROTATION=true  # if true, rotate through all workers for failover
+WORKER_FAILOVER_LIST=("worker1" "worker2" "worker3" "worker4" "worker5" "worker6")
 
 # Default values
 READ_WEIGHT=50
@@ -98,14 +101,24 @@ for i in "${!STAGES[@]}"; do
   DURATION=${STAGES[$i]}
   echo "[Failover] Stage $STAGE_NUM: Running stage for ${DURATION}s."
   sleep $DURATION
-  # At the end of the stage, stop worker1 for FAILOVER_DURATION seconds
-  echo "[Failover] Stage $STAGE_NUM complete. Stopping worker1 for $FAILOVER_DURATION seconds."
-  docker stop citus_worker1
+
+  # Select the worker to fail over based on rotation or fixed worker
+  if [ "$WORKER_ROTATION" = true ]; then
+    WORKER_INDEX=$((i % ${#WORKER_FAILOVER_LIST[@]}))
+    WORKER_TO_FAILOVER=${WORKER_FAILOVER_LIST[$WORKER_INDEX]}
+  else
+    WORKER_TO_FAILOVER="worker1"
+  fi
+
+  # At the end of the stage, stop selected worker for FAILOVER_DURATION seconds
+  echo "[Failover] Stage $STAGE_NUM complete. Stopping $WORKER_TO_FAILOVER for $FAILOVER_DURATION seconds."
+  docker stop citus_$WORKER_TO_FAILOVER
   sleep $FAILOVER_DURATION
-  docker start citus_worker1
-  echo "[Failover] worker1 restarted after failover at end of stage $STAGE_NUM."
+  docker start citus_$WORKER_TO_FAILOVER
+  echo "[Failover] $WORKER_TO_FAILOVER restarted after failover at end of stage $STAGE_NUM."
+
   # If last stage, just finish
-  if [ $((i+1)) -eq ${#STAGES[@]} ]; then
+  if [ $((i+1)) -eq ${#STAGES[@]}]; then
     break
   fi
 done
