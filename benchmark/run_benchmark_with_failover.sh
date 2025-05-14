@@ -1,24 +1,17 @@
 #!/bin/bash
 set -e
 
-# This script runs the Locust benchmark and simulates failover on workers at every stage.
-# It assumes the stages and durations are defined in benchmark/locust_benchmark.py.
+# This script runs the Locust benchmark and simulates failover on workers.
+# It uses a fixed test duration with regular failover events.
 
 # --- CONFIGURABLE ---
 BENCHMARK_SCRIPT="./benchmark/run_locust_benchmark.sh"
-STAGES=(
-  120  # Overnight baseline
-  180  # Morning peak
-  180  # Late morning decline
-  180  # Lunch spike
-  180  # Afternoon steady
-  60   # Flash sale – build up
-  120  # Flash sale – peak
-  60   # Flash sale – post sale
-  180  # Evening peak
-  60   # Late night wind down – 1
-  120  # Late night wind down – 2
-)
+
+# Total benchmark duration in seconds (10 minutes by default)
+TEST_DURATION=${TEST_DURATION:-600}
+
+# How often to trigger a failover event (every 120 seconds by default)
+FAILOVER_INTERVAL=${FAILOVER_INTERVAL:-120}
 
 # Failover simulation settings
 FAILOVER_DURATION=10  # seconds to keep worker down before each stage
@@ -96,33 +89,43 @@ echo "[Failover] Starting benchmark with operation mode: $OPERATION_MODE (read:$
 # Start the benchmark in the background with configured settings
 $BENCHMARK_CMD &
 
-for i in "${!STAGES[@]}"; do
-  STAGE_NUM=$((i+1))
-  DURATION=${STAGES[$i]}
-  echo "[Failover] Stage $STAGE_NUM: Running stage for ${DURATION}s."
-  sleep $DURATION
+# Calculate how many failover events we'll have
+NUM_FAILOVERS=$((TEST_DURATION / FAILOVER_INTERVAL))
+
+# Start counter
+ELAPSED_TIME=0
+
+for i in $(seq 1 $NUM_FAILOVERS); do
+  FAILOVER_NUM=$i
+  
+  echo "[Failover] Running test interval $FAILOVER_NUM for ${FAILOVER_INTERVAL}s."
+  sleep $FAILOVER_INTERVAL
+  ELAPSED_TIME=$((ELAPSED_TIME + FAILOVER_INTERVAL))
+  
+  # If we've reached the test duration, stop
+  if [ $ELAPSED_TIME -ge $TEST_DURATION ]; then
+    echo "[Failover] Test duration reached. No more failovers."
+    break
+  fi
 
   # Select the worker to fail over based on rotation or fixed worker
   if [ "$WORKER_ROTATION" = true ]; then
-    WORKER_INDEX=$((i % ${#WORKER_FAILOVER_LIST[@]}))
+    WORKER_INDEX=$(( (i-1) % ${#WORKER_FAILOVER_LIST[@]} ))
     WORKER_TO_FAILOVER=${WORKER_FAILOVER_LIST[$WORKER_INDEX]}
   else
     WORKER_TO_FAILOVER="worker1"
   fi
 
-  # At the end of the stage, stop selected worker for FAILOVER_DURATION seconds
-  echo "[Failover] Stage $STAGE_NUM complete. Stopping $WORKER_TO_FAILOVER for $FAILOVER_DURATION seconds."
+  # Stop selected worker for FAILOVER_DURATION seconds
+  echo "[Failover] Interval $FAILOVER_NUM complete. Stopping $WORKER_TO_FAILOVER for $FAILOVER_DURATION seconds."
   docker stop citus_$WORKER_TO_FAILOVER
   sleep $FAILOVER_DURATION
   docker start citus_$WORKER_TO_FAILOVER
-  echo "[Failover] $WORKER_TO_FAILOVER restarted after failover at end of stage $STAGE_NUM."
-
-  # If last stage, just finish
-  if [ $((i+1)) -eq ${#STAGES[@]}]; then
-    break
-  fi
+  echo "[Failover] $WORKER_TO_FAILOVER restarted after failover $FAILOVER_NUM."
+  
+  ELAPSED_TIME=$((ELAPSED_TIME + FAILOVER_DURATION))
 done
 
-echo "[Failover] All stages complete. Waiting for benchmark to finish."
+echo "[Failover] Test complete. Waiting for benchmark to finish."
 
 echo "[Failover] Benchmark and failover scenario complete."

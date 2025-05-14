@@ -9,7 +9,6 @@ import json
 from datetime import datetime, timedelta
 from locust.exception import StopUser
 from collections import deque
-import numpy as np
 from locust import LoadTestShape
 import threading
 
@@ -81,51 +80,17 @@ ADJUSTMENT_FACTOR = float(os.getenv("ADJUSTMENT_FACTOR", "1.2"))  # How aggressi
 # Global variable to track current mean wait time
 current_mean_wait = BASE_MEAN_WAIT
 
-# Define workload stages with duration in seconds and arrival rate λ (requests per second)
-STAGES = [
-    {"name": "Overnight baseline", "duration": 120, "lambda": 100},
-    {"name": "Morning commute rush", "duration": 180, "lambda": 400},
-    {"name": "Mid-morning slowdown", "duration": 180, "lambda": 300},
-    {"name": "Lunch hour surge", "duration": 180, "lambda": 600},
-    {"name": "Afternoon business travel", "duration": 180, "lambda": 300},
-    {"name": "Rush hour build-up", "duration": 60, "lambda": 1000},
-    {"name": "Rush hour peak", "duration": 120, "lambda": 2000},
-    {"name": "Rush hour wind-down", "duration": 60, "lambda": 1000},
-    {"name": "Evening outing rush", "duration": 180, "lambda": 500},
-    {"name": "Late evening return", "duration": 60, "lambda": 250},
-    {"name": "Nightfall slowdown", "duration": 120, "lambda": 100}
-]
+# No stages or workload profiles defined - using constant load
 
-# Define dynamic exponential inter-arrival time function by stages
-def dynamic_poisson_wait_time():
+# Define simple wait time function with fixed delay
+def fixed_wait_time():
     """
-    Return inter-arrival times following an exponential distribution per defined stages.
-    Each stage has its own rate λ and duration.
+    Return a consistent wait time based on current_mean_wait
     """
-    print("Using staged Poisson arrival with stages:")
-    for s in STAGES:
-        print(f" - {s['name']}: duration {s['duration']}s, λ={s['lambda']} req/s")
+    print("Using fixed wait time")
     def wait_time(user_instance=None):
-        # Determine elapsed time since test start
-        if custom_metrics.get("start_time") is None:
-            elapsed = 0
-        else:
-            elapsed = time.time() - custom_metrics["start_time"]
-        # Find current stage
-        remaining = elapsed
-        for stage in STAGES:
-            if remaining < stage["duration"]:
-                lam = stage["lambda"]
-                stage_name = stage["name"]
-                break
-            remaining -= stage["duration"]
-        else:
-            lam = STAGES[-1]["lambda"]
-            stage_name = STAGES[-1]["name"]
-        # Sample from exponential distribution with rate lam
-        dt = random.expovariate(lam)
-        print(f"Stage '{stage_name}', elapsed {elapsed:.2f}s, sampling exp(λ={lam}) => dt={dt:.2f}s")
-        return dt
+        # Simply use current_mean_wait as the wait time
+        return current_mean_wait
     return wait_time
 
 # Function to adjust wait time based on system load
@@ -562,8 +527,8 @@ def execute_query(query, params=None, query_type="read"):
 class PostgresUser(User):
     """Locust user class for PostgreSQL benchmark"""
 
-    # Use dynamic Poisson distribution for wait time
-    wait_time = dynamic_poisson_wait_time()
+    # Use fixed wait time
+    wait_time = fixed_wait_time()
 
     def on_start(self):
         """Called when a User starts running"""
@@ -786,33 +751,26 @@ class PostgresUser(User):
                     exception=e
                 )
 
-# Poisson-based load shape: sample user count per stage
-class PoissonUserShape(LoadTestShape):
+# Standard constant load shape
+class ConstantLoadShape(LoadTestShape):
     """
-    Number of users at each tick sampled from Poisson distribution according to current stage.
+    Maintains a constant number of users throughout the test.
     """
+    def __init__(self):
+        # Default user count and spawn rate
+        self.user_count = int(os.getenv("USER_COUNT", "100"))
+        self.spawn_rate = int(os.getenv("SPAWN_RATE", "10"))
+        self.test_duration = int(os.getenv("TEST_DURATION", "600"))  # 10 minutes by default
+        print(f"Running constant load with {self.user_count} users, spawn rate of {self.spawn_rate}/s for {self.test_duration}s")
+        
     def tick(self):
         # Determine elapsed time since test start
         start = custom_metrics.get("start_time") or time.time()
         elapsed = time.time() - start
-        # Stop after last stage if elapsed time exceeds total duration
-        total_duration = sum(s["duration"] for s in STAGES)
-        if elapsed >= total_duration:
-            print("All stages complete. Stopping test.")
+        
+        # Stop after test duration
+        if elapsed >= self.test_duration:
+            print("Test duration reached. Stopping test.")
             return None
-        # Find current stage
-        remaining = elapsed
-        for s in STAGES:
-            if remaining < s["duration"]:
-                lam = s["lambda"]
-                stage_name = s["name"]
-                break
-            remaining -= s["duration"]
-        else:
-            lam = STAGES[-1]["lambda"]
-            stage_name = STAGES[-1]["name"]
-        # Sample user count and set spawn rate equal to lambda
-        user_count = np.random.poisson(lam)
-        spawn_rate = lam
-        print(f"Stage '{stage_name}': sampled users=Poisson({lam}) => {user_count}, spawn_rate={spawn_rate}")
-        return (user_count, spawn_rate)
+            
+        return (self.user_count, self.spawn_rate)
