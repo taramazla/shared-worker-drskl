@@ -165,22 +165,32 @@ def ensure_vehicle_locations_table_exists():
                 else:
                     print("PostGIS extension already exists")
 
-            # Now check if the table exists
+            # Check which schema the table exists in, if any
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables
-                        WHERE table_name = 'vehicle_locations'
-                    );
+                    SELECT table_schema FROM information_schema.tables
+                    WHERE table_name = 'vehicle_locations'
+                    LIMIT 1;
                 """)
-                table_exists = cursor.fetchone()[0]
+                result = cursor.fetchone()
+                
+                if result:
+                    schema_name = result[0]
+                    print(f"Found vehicle_locations table in schema: {schema_name}")
+                    # Set search path to the schema where the table was found
+                    cursor.execute(f"SET search_path TO {schema_name}, public;")
+                    conn.commit()
+                    table_exists = True
+                else:
+                    print("vehicle_locations table not found in any schema")
+                    table_exists = False
 
                 if not table_exists:
                     print("Creating vehicle_locations table...")
 
-                    # Create the table
+                    # Create the table in public schema
                     cursor.execute("""
-                        CREATE TABLE vehicle_locations (
+                        CREATE TABLE public.vehicle_locations (
                           id bigserial PRIMARY KEY,
                           vehicle_id int NOT NULL,
                           location geometry(Point, 4326) NOT NULL,
@@ -193,28 +203,50 @@ def ensure_vehicle_locations_table_exists():
                     # Create indexes
                     cursor.execute("""
                         CREATE INDEX idx_vehicle_locations_location
-                        ON vehicle_locations USING GIST (location);
+                        ON public.vehicle_locations USING GIST (location);
                     """)
                     conn.commit()
 
                     cursor.execute("""
                         CREATE INDEX idx_vehicle_locations_region_code
-                        ON vehicle_locations (region_code);
+                        ON public.vehicle_locations (region_code);
                     """)
                     conn.commit()
 
                     cursor.execute("""
                         CREATE INDEX idx_vehicle_locations_vehicle_id
-                        ON vehicle_locations (vehicle_id);
+                        ON public.vehicle_locations (vehicle_id);
                     """)
                     conn.commit()
+                    
+                    # Try to distribute the table if we're using Citus
+                    try:
+                        print("Attempting to distribute the table...")
+                        cursor.execute("""
+                            SELECT EXISTS (
+                                SELECT 1 FROM pg_proc WHERE proname = 'create_distributed_table'
+                            );
+                        """)
+                        has_create_distributed_table = cursor.fetchone()[0]
+                        
+                        if has_create_distributed_table:
+                            cursor.execute("""
+                                SELECT create_distributed_table('public.vehicle_locations', 'region_code');
+                            """)
+                            conn.commit()
+                            print("Successfully distributed the vehicle_locations table")
+                        else:
+                            print("create_distributed_table function not found. Running on standard PostgreSQL.")
+                    except Exception as e:
+                        print(f"Warning: Could not distribute table: {e}")
+                        # Don't fail if we can't distribute - might be running on standard Postgres
 
                     # Insert some sample data (commit in smaller batches)
                     print("Inserting sample data in batches...")
                     batch_size = 1000
                     for i in range(0, 10, 1):
                         cursor.execute(f"""
-                            INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code)
+                            INSERT INTO public.vehicle_locations (vehicle_id, location, recorded_at, region_code)
                             SELECT
                                 (floor(random() * 10000) + 1)::int AS vehicle_id,
                                 ST_SetSRID(
@@ -236,7 +268,7 @@ def ensure_vehicle_locations_table_exists():
                         print(f"Inserted batch {i+1}/10 ({batch_size} rows)")
 
                     # Verify the table was created successfully
-                    cursor.execute("SELECT COUNT(*) FROM vehicle_locations;")
+                    cursor.execute("SELECT COUNT(*) FROM public.vehicle_locations;")
                     row_count = cursor.fetchone()[0]
 
                     if row_count > 0:
@@ -246,7 +278,7 @@ def ensure_vehicle_locations_table_exists():
                         print("Table created but no data was inserted")
                 else:
                     # Table already exists, verify it has data
-                    cursor.execute("SELECT COUNT(*) FROM vehicle_locations;")
+                    cursor.execute("SELECT COUNT(*) FROM public.vehicle_locations;")
                     row_count = cursor.fetchone()[0]
                     print(f"vehicle_locations table already exists with {row_count} rows")
 
@@ -256,7 +288,7 @@ def ensure_vehicle_locations_table_exists():
                         batch_size = 1000
                         for i in range(0, 10, 1):
                             cursor.execute(f"""
-                                INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code)
+                                INSERT INTO public.vehicle_locations (vehicle_id, location, recorded_at, region_code)
                                 SELECT
                                     (floor(random() * 10000) + 1)::int AS vehicle_id,
                                     ST_SetSRID(
@@ -312,9 +344,9 @@ def get_connection():
         database=DB_NAME
     )
 
-    # Set search_path for this connection to ensure schema visibility
+    # Set search_path for this connection to include both public and citus schemas
     with conn.cursor() as cursor:
-        cursor.execute("SET search_path TO citus;")
+        cursor.execute("SET search_path TO public, citus;")
         conn.commit()
 
     return conn
@@ -564,7 +596,7 @@ class PostgresUser(User):
                 ])
 
                 if query_type == "count_all":
-                    count, latency = execute_query("SELECT COUNT(*) FROM vehicle_locations")
+                    count, latency = execute_query("SELECT COUNT(*) FROM public.vehicle_locations")
                     self.environment.events.request.fire(
                         request_type="Read",
                         name="Count All Vehicles",
@@ -576,7 +608,7 @@ class PostgresUser(User):
                 elif query_type == "recent_vehicles":
                     days = random.randint(1, 30)
                     count, latency = execute_query(
-                        "SELECT vehicle_id, recorded_at, region_code FROM vehicle_locations " +
+                        "SELECT vehicle_id, recorded_at, region_code FROM public.vehicle_locations " +
                         "WHERE recorded_at > %s ORDER BY recorded_at DESC LIMIT 100",
                         (datetime.now() - timedelta(days=days),)
                     )
@@ -590,7 +622,7 @@ class PostgresUser(User):
 
                 elif query_type == "random_vehicle":
                     count, latency = execute_query(
-                        "SELECT vehicle_id, recorded_at, region_code FROM vehicle_locations " +
+                        "SELECT vehicle_id, recorded_at, region_code FROM public.vehicle_locations " +
                         "WHERE vehicle_id = %s ORDER BY recorded_at DESC LIMIT 1",
                         (random.randint(1, 10000),)
                     )
@@ -604,7 +636,7 @@ class PostgresUser(User):
 
                 elif query_type == "region_summary":
                     count, latency = execute_query(
-                        "SELECT region_code, COUNT(*) FROM vehicle_locations GROUP BY region_code"
+                        "SELECT region_code, COUNT(*) FROM public.vehicle_locations GROUP BY region_code"
                     )
                     self.environment.events.request.fire(
                         request_type="Read",
@@ -642,7 +674,7 @@ class PostgresUser(User):
                         radius = random.randint(1000, 10000)  # 1-10 km radius
 
                         count, latency = execute_query(
-                            "SELECT id, vehicle_id, recorded_at, region_code FROM vehicle_locations " +
+                            "SELECT id, vehicle_id, recorded_at, region_code FROM public.vehicle_locations " +
                             "WHERE ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s) " +
                             "LIMIT 500",
                             (lon, lat, radius),
@@ -664,7 +696,7 @@ class PostgresUser(User):
                         max_lon = min_lon + random.uniform(0.05, 0.1)
 
                         count, latency = execute_query(
-                            "SELECT id, vehicle_id, recorded_at, region_code FROM vehicle_locations " +
+                            "SELECT id, vehicle_id, recorded_at, region_code FROM public.vehicle_locations " +
                             "WHERE location && ST_MakeEnvelope(%s, %s, %s, %s, 4326) " +
                             "LIMIT 500",
                             (min_lon, min_lat, max_lon, max_lat),
@@ -702,7 +734,7 @@ class PostgresUser(User):
                 if query_type == "insert_vehicle":
                     # Insert a new vehicle location
                     count, latency = execute_query(
-                        "INSERT INTO vehicle_locations (vehicle_id, location, recorded_at, region_code) " +
+                        "INSERT INTO public.vehicle_locations (vehicle_id, location, recorded_at, region_code) " +
                         "VALUES (%s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), NOW(), %s)",
                         (random.randint(1, 10000), -74.0 + random.uniform(-0.1, 0.1), 40.7 + random.uniform(-0.1, 0.1),
                          random.choice(['region_north', 'region_south', 'region_central'])),
@@ -719,7 +751,7 @@ class PostgresUser(User):
                 elif query_type == "update_vehicle":
                     # Update a vehicle location
                     count, latency = execute_query(
-                        "UPDATE vehicle_locations SET location = ST_SetSRID(ST_MakePoint(%s, %s), 4326) " +
+                        "UPDATE public.vehicle_locations SET location = ST_SetSRID(ST_MakePoint(%s, %s), 4326) " +
                         "WHERE vehicle_id = %s",
                         (-74.0 + random.uniform(-0.1, 0.1), 40.7 + random.uniform(-0.1, 0.1), random.randint(1, 10000)),
                         "write"
@@ -735,7 +767,7 @@ class PostgresUser(User):
                 elif query_type == "delete_vehicle":
                     # Delete a vehicle location
                     count, latency = execute_query(
-                        "DELETE FROM vehicle_locations WHERE vehicle_id = %s",
+                        "DELETE FROM public.vehicle_locations WHERE vehicle_id = %s",
                         (random.randint(1, 10000),),
                         "write"
                     )

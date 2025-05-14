@@ -12,7 +12,7 @@ CONTAINER=${CONTAINER:-"citus_loadbalancer"}
 # Test parameters
 USERS=${USERS:-500}
 SPAWN_RATE=${SPAWN_RATE:-10}
-RUN_TIME=${RUN_TIME:-60}
+RUN_TIME=${RUN_TIME:-300}
 LOCUST_HOST=${LOCUST_HOST:-"http://localhost:8089"}
 READ_WEIGHT=${READ_WEIGHT:-80}  # Default 80% reads
 WRITE_WEIGHT=${WRITE_WEIGHT:-20} # Default 20% writes
