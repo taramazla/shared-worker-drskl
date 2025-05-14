@@ -18,6 +18,10 @@ FAILOVER_DURATION=10  # seconds to keep worker down before each stage
 WORKER_ROTATION=true  # if true, rotate through all workers for failover
 WORKER_FAILOVER_LIST=("worker1" "worker2" "worker3" "worker4" "worker5" "worker6")
 
+# By default, maximum concurrent connections will equal the user count
+# Setting MAX_CONCURRENT_QUERIES will override this behavior
+# MAX_CONCURRENT_QUERIES=${MAX_CONCURRENT_QUERIES}  # Uncomment to set a specific value
+
 # Default values
 READ_WEIGHT=50
 WRITE_WEIGHT=50
@@ -54,6 +58,10 @@ while [[ $# -gt 0 ]]; do
     --web-ui-port=*)
       WEB_UI_PORT=${1#*=}
       WEB_UI_MODE=true
+      shift
+      ;;
+    --max-connections=*)
+      MAX_CONCURRENT_QUERIES=${1#*=}
       shift
       ;;
     *)
@@ -97,11 +105,11 @@ ELAPSED_TIME=0
 
 for i in $(seq 1 $NUM_FAILOVERS); do
   FAILOVER_NUM=$i
-  
+
   echo "[Failover] Running test interval $FAILOVER_NUM for ${FAILOVER_INTERVAL}s."
   sleep $FAILOVER_INTERVAL
   ELAPSED_TIME=$((ELAPSED_TIME + FAILOVER_INTERVAL))
-  
+
   # If we've reached the test duration, stop
   if [ $ELAPSED_TIME -ge $TEST_DURATION ]; then
     echo "[Failover] Test duration reached. No more failovers."
@@ -122,7 +130,7 @@ for i in $(seq 1 $NUM_FAILOVERS); do
   sleep $FAILOVER_DURATION
   docker start citus_$WORKER_TO_FAILOVER
   echo "[Failover] $WORKER_TO_FAILOVER restarted after failover $FAILOVER_NUM."
-  
+
   ELAPSED_TIME=$((ELAPSED_TIME + FAILOVER_DURATION))
 done
 

@@ -28,7 +28,9 @@ WRITE_WEIGHT = int(os.getenv("WRITE_WEIGHT", "20"))  # Default 20% writes
 SPATIAL_WEIGHT = min(30, READ_WEIGHT) if READ_WEIGHT > 0 else 0
 
 # Concurrent connection settings
-MAX_CONCURRENT_QUERIES = int(os.getenv("MAX_CONCURRENT_QUERIES", "50"))  # Maximum concurrent queries
+# Set MAX_CONCURRENT_QUERIES based on USER_COUNT (virtual users) or a provided value
+USER_COUNT = int(os.getenv("USER_COUNT", "100"))
+MAX_CONCURRENT_QUERIES = int(os.getenv("MAX_CONCURRENT_QUERIES", str(USER_COUNT)))  # Default to match user count
 CONCURRENT_MODE = os.getenv("CONCURRENT_MODE", "true").lower() == "true"  # Enable/disable concurrent mode
 
 # Create a semaphore to limit concurrent connections
@@ -48,7 +50,10 @@ else:
 # Print concurrent connection mode
 print(f"Concurrent mode: {'ENABLED' if CONCURRENT_MODE else 'DISABLED'}")
 if CONCURRENT_MODE:
-    print(f"Maximum concurrent connections: {MAX_CONCURRENT_QUERIES}")
+    if MAX_CONCURRENT_QUERIES == USER_COUNT:
+        print(f"Maximum concurrent connections: {MAX_CONCURRENT_QUERIES} (matching virtual user count)")
+    else:
+        print(f"Maximum concurrent connections: {MAX_CONCURRENT_QUERIES} (custom setting, virtual user count: {USER_COUNT})")
 
 # Store metrics for custom reporting
 custom_metrics = {
@@ -762,15 +767,15 @@ class ConstantLoadShape(LoadTestShape):
         self.spawn_rate = int(os.getenv("SPAWN_RATE", "10"))
         self.test_duration = int(os.getenv("TEST_DURATION", "600"))  # 10 minutes by default
         print(f"Running constant load with {self.user_count} users, spawn rate of {self.spawn_rate}/s for {self.test_duration}s")
-        
+
     def tick(self):
         # Determine elapsed time since test start
         start = custom_metrics.get("start_time") or time.time()
         elapsed = time.time() - start
-        
+
         # Stop after test duration
         if elapsed >= self.test_duration:
             print("Test duration reached. Stopping test.")
             return None
-            
+
         return (self.user_count, self.spawn_rate)

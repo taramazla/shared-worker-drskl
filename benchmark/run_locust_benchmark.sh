@@ -57,8 +57,15 @@ done
 
 # Export variables for Locust
 export DB_HOST DB_PORT DB_USER DB_PASSWORD DB_NAME CONTAINER
-export READ_WEIGHT WRITE_WEIGHT 
+export READ_WEIGHT WRITE_WEIGHT
 export USER_COUNT=${USERS} SPAWN_RATE=${SPAWN_RATE} TEST_DURATION=${RUN_TIME}
+
+# By default MAX_CONCURRENT_QUERIES will match USER_COUNT in the locust script
+# But you can override it by setting the MAX_CONCURRENT_QUERIES environment variable
+if [ -n "$MAX_CONCURRENT_QUERIES" ]; then
+  export MAX_CONCURRENT_QUERIES
+  echo "Using custom MAX_CONCURRENT_QUERIES: $MAX_CONCURRENT_QUERIES"
+fi
 
 # Colors for output
 GREEN='\033[0;32m'
