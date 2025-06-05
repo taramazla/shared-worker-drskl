@@ -1,28 +1,47 @@
 #!/bin/bash
-set -e
 
-# Default parameters
-USERS=${USERS:-50}  # Default to fewer users for write benchmarks
-SPAWN_RATE=${SPAWN_RATE:-5}  # Slower spawn rate for writes
+# Write benchmark script
+# Defaults: 100 users, 10 spawn rate, 60 seconds runtime
+
+# Source the setup script to ensure the environment is ready
+source ./setup_benchmark_env.sh
+
+# Default values
+USERS=${USERS:-100}
+SPAWN_RATE=${SPAWN_RATE:-10}
 RUN_TIME=${RUN_TIME:-60}
+DB_HOST=${DB_HOST:-"localhost"}
+DB_PORT=${DB_PORT:-"5432"}
+DB_USER=${DB_USER:-"citus"}
+DB_PASSWORD=${DB_PASSWORD:-"citus"}
+DB_NAME=${DB_NAME:-"citus"}
+READ_RATIO=0
+WRITE_RATIO=100
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+# Export environment variables for Locust (required for access in locustfile.py)
+export DB_HOST
+export DB_PORT
+export DB_USER
+export DB_PASSWORD
+export DB_NAME
+export READ_RATIO
+export WRITE_RATIO
 
-# Create a descriptive results directory
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-RESULTS_DIR="benchmark_results/write_benchmark_${TIMESTAMP}"
-mkdir -p $RESULTS_DIR
+echo "Starting write-only benchmark with $USERS users, spawn rate $SPAWN_RATE, runtime $RUN_TIME seconds"
+echo "Connecting to database at $DB_HOST:$DB_PORT"
 
-echo "Starting WRITE-ONLY benchmark with $USERS users for $RUN_TIME seconds"
-echo "Results will be saved to $RESULTS_DIR"
+# Create results directory if it doesn't exist
+mkdir -p benchmark_results
 
-# Run the benchmark with write-only flag
-USERS=$USERS SPAWN_RATE=$SPAWN_RATE RUN_TIME=$RUN_TIME ${SCRIPT_DIR}/run_locust_benchmark.sh --write-only
+# Run locust in headless mode with write-only tag
+locust --host=http://localhost \
+       --users=$USERS \
+       --spawn-rate=$SPAWN_RATE \
+       --run-time=${RUN_TIME}s \
+       --headless \
+       --only-summary \
+       --tags write \
+       --csv=benchmark_results/write_benchmark_$(date +%Y%m%d_%H%M%S) \
+       -f locustfile.py
 
-# Copy the results to the specific directory
-cp benchmark_results/locust_write-only.log $RESULTS_DIR/
-cp benchmark_results/locust_metrics_*.json $RESULTS_DIR/
-
-echo "Benchmark complete! Results saved to $RESULTS_DIR"
-echo "Summary of throughput and latency metrics:"
-echo "----------------------------------------"
+echo "Benchmark complete! Results saved to benchmark_results/ directory."

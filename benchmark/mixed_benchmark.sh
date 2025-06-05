@@ -1,12 +1,15 @@
 #!/bin/bash
 
-# Main script to run Locust benchmark with web UI for interactive testing
-# This allows you to manually control the benchmark through the Locust web interface
+# Mixed benchmark script with configurable read/write ratio
+# Default: 80% reads, 20% writes
 
 # Source the setup script to ensure the environment is ready
 source ./setup_benchmark_env.sh
 
-# Default values for database connection
+# Default values
+USERS=${USERS:-100}
+SPAWN_RATE=${SPAWN_RATE:-10}
+RUN_TIME=${RUN_TIME:-60}
 DB_HOST=${DB_HOST:-"localhost"}
 DB_PORT=${DB_PORT:-"5432"}
 DB_USER=${DB_USER:-"citus"}
@@ -14,7 +17,6 @@ DB_PASSWORD=${DB_PASSWORD:-"citus"}
 DB_NAME=${DB_NAME:-"citus"}
 READ_RATIO=${READ_RATIO:-80}
 WRITE_RATIO=${WRITE_RATIO:-20}
-PORT=${PORT:-8089}
 
 # Export environment variables for Locust (required for access in locustfile.py)
 export DB_HOST
@@ -25,22 +27,27 @@ export DB_NAME
 export READ_RATIO
 export WRITE_RATIO
 
-# Check if a specific port was provided
-if [ ! -z "$1" ]; then
-    PORT=$1
-fi
-
 # Validate read/write ratio
 if [ "$READ_RATIO" -lt 0 ] || [ "$WRITE_RATIO" -lt 0 ] || [ $(($READ_RATIO + $WRITE_RATIO)) -ne 100 ]; then
     echo "Error: READ_RATIO and WRITE_RATIO must be non-negative and sum to 100."
     exit 1
 fi
 
-echo "Starting Locust web interface on http://localhost:$PORT"
+echo "Starting mixed benchmark with $USERS users, spawn rate $SPAWN_RATE, runtime $RUN_TIME seconds"
 echo "Read/Write ratio: $READ_RATIO/$WRITE_RATIO"
 echo "Connecting to database at $DB_HOST:$DB_PORT"
 
-# Run locust with web UI
+# Create results directory if it doesn't exist
+mkdir -p benchmark_results
+
+# Run locust in headless mode with mixed read/write
 locust --host=http://localhost \
-       --web-port=$PORT \
+       --users=$USERS \
+       --spawn-rate=$SPAWN_RATE \
+       --run-time=${RUN_TIME}s \
+       --headless \
+       --only-summary \
+       --csv=benchmark_results/mixed_benchmark_${READ_RATIO}_${WRITE_RATIO}_$(date +%Y%m%d_%H%M%S) \
        -f locustfile.py
+
+echo "Benchmark complete! Results saved to benchmark_results/ directory."
