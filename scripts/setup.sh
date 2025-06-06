@@ -22,6 +22,9 @@ wait_for coordinator_secondary 5432
 wait_for worker1 5432
 wait_for worker2 5432
 wait_for worker3 5432
+wait_for worker4 5432
+wait_for worker5 5432
+wait_for worker6 5432
 
 echo "All nodes are ready."
 
@@ -41,6 +44,15 @@ psql -h worker2 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS citus;"
 echo "Creating Citus extension on worker3..."
 psql -h worker3 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS citus;"
 
+echo "Creating Citus extension on worker4..."
+psql -h worker4 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS citus;"
+
+echo "Creating Citus extension on worker5..."
+psql -h worker5 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS citus;"
+
+echo "Creating Citus extension on worker6..."
+psql -h worker6 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS citus;"
+
 # Create the PostGIS extension on the coordinators and workers
 echo "Creating PostGIS extension on primary coordinator..."
 psql -h coordinator_primary -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS postgis;"
@@ -57,6 +69,15 @@ psql -h worker2 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS postgis;"
 echo "Creating PostGIS extension on worker3..."
 psql -h worker3 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS postgis;"
 
+echo "Creating PostGIS extension on worker4..."
+psql -h worker4 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+
+echo "Creating PostGIS extension on worker5..."
+psql -h worker5 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+
+echo "Creating PostGIS extension on worker6..."
+psql -h worker6 -U citus -d citus -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+
 # Set shard replication factor before creating distributed tables
 echo "Setting shard replication factor on primary coordinator..."
 psql -h coordinator_primary -U citus -d citus -c "ALTER SYSTEM SET citus.shard_replication_factor = 2;"
@@ -71,11 +92,17 @@ echo "Adding worker nodes to the primary coordinator..."
 psql -h coordinator_primary -U citus -d citus -c "SELECT * FROM citus_add_node('worker1', 5432);"
 psql -h coordinator_primary -U citus -d citus -c "SELECT * FROM citus_add_node('worker2', 5432);"
 psql -h coordinator_primary -U citus -d citus -c "SELECT * FROM citus_add_node('worker3', 5432);"
+psql -h coordinator_primary -U citus -d citus -c "SELECT * FROM citus_add_node('worker4', 5432);"
+psql -h coordinator_primary -U citus -d citus -c "SELECT * FROM citus_add_node('worker5', 5432);"
+psql -h coordinator_primary -U citus -d citus -c "SELECT * FROM citus_add_node('worker6', 5432);"
 
 echo "Adding worker nodes to the secondary coordinator..."
 psql -h coordinator_secondary -U citus -d citus -c "SELECT * FROM citus_add_node('worker1', 5432);"
 psql -h coordinator_secondary -U citus -d citus -c "SELECT * FROM citus_add_node('worker2', 5432);"
 psql -h coordinator_secondary -U citus -d citus -c "SELECT * FROM citus_add_node('worker3', 5432);"
+psql -h coordinator_secondary -U citus -d citus -c "SELECT * FROM citus_add_node('worker4', 5432);"
+psql -h coordinator_secondary -U citus -d citus -c "SELECT * FROM citus_add_node('worker5', 5432);"
+psql -h coordinator_secondary -U citus -d citus -c "SELECT * FROM citus_add_node('worker6', 5432);"
 
 # Verify replication setup
 echo "Verifying replication setup on primary coordinator..."
